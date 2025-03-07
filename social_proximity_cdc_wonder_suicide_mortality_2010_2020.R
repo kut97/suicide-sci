@@ -21,7 +21,7 @@ library(did)
 library(DRDID)
 library(lubridate)
 library(zoo)
-
+library(SDPDmod)
 
 #### loading the data set ### 
 df_suicide_mortality <- read.csv('C:/Users/kusha/Desktop/Suide Ideation Data Request Form/suicide-ideation-social-networks/suicide_ideation_cdc_Wonder_1999_2020.csv',colClasses = c(FIPS = "character"))
@@ -139,6 +139,21 @@ geoid_lat_lng<- data.frame(
 suicide_mortality <- left_join(suicide_mortality,geoid_lat_lng, by=c("FIPS"="GEOID"))
 ### creating deaths per 100,000 population ####
 suicide_mortality <- suicide_mortality %>% mutate(death_rates_per_100_k = (deaths/ACS_TOT_POP_WT)*100000)
+### verifying the panel data is complete ##### 
+# Define FIPS codes to remove (historical changes)
+fips_to_remove <- c("02158", "02261", "46102")
+
+# Remove these FIPS from the dataset
+suicide_mortality <- suicide_mortality %>% 
+  filter(!FIPS %in% fips_to_remove)
+
+# Re-run the completeness check
+panel_completeness <- suicide_mortality %>%
+  group_by(FIPS) %>%
+  summarise(n_years = n_distinct(year))
+
+# Check if panel is now balanced
+table(panel_completeness$n_years)  # Should ideally be 11 for all
 ### deaths social proximity ####
 # Subset and rename columns
 #Preparing `social_df` with necessary columns
@@ -215,6 +230,9 @@ for (yr in unique(suicide_mortality$year)) {
 }
 
 
+
+
+
 #### defining all data ###
 # 1) Combine all yearly subsets (stored in results_list) into one data frame
 all_data <- bind_rows(results_list)
@@ -230,176 +248,492 @@ missing_coords <- all_data %>%
 
 missing_coords
 
-### imputing the longitude and latitude for the missing county data 02261 VARDEZ-CORDOVA https://gist.github.com/russellsamora/12be4f9f574e92413ea3f92ce1bc58e6 ###
-all_data$Latitude[all_data$GEOID == "02261"] <- 61.54964404
-all_data$Longitude[all_data$GEOID == "02261"] <- -144.5019516
 
 
-### spatial proximity ####
-calculateSpatialProximity_by_year <- function(all_data) {
-  # Check for missing data
-  if (any(is.na(all_data$GEOID) | is.na(all_data$Longitude) | is.na(all_data$Latitude))) {
-    stop("Missing GEOID, Longitude, or Latitude in the data. Please clean the data.")
-  }
-  
-  # Extract unique counties for the distance matrix
-  unique_counties <- all_data %>%
-    distinct(GEOID, Longitude, Latitude) %>%
-    arrange(GEOID)
-  
-  # Compute geodesic distance in km
-  dist_km <- geodist::geodist(unique_counties[, c("Longitude", "Latitude")],
-                              measure = "geodesic") / 1000
-  
-  # Implement a_ij = 1 + 1/d_ij, for i != j
-  # (Note: if d_ij = 0 for i == j, then we set the diagonal to 0 below)
-  distance_matrix <- 1 + 1 / dist_km
-  
-  # Zero out the diagonal (no self-distance)
-  diag(distance_matrix) <- 0
-  
-  # Normalize each row so rows sum to 1
-  row_sums <- rowSums(distance_matrix)
-  if (any(row_sums == 0)) {
-    warning("Some rows in the distance matrix sum to zero. Check the input data.")
-    row_sums[row_sums == 0] <- 1  # Avoid division by zero
-  }
-  A_ij <- sweep(distance_matrix, 1, row_sums, FUN = "/")
-  rownames(A_ij) <- unique_counties$GEOID
-  
-  # Initialize d_minus_i
-  all_data$d_minus_i <- NA_real_
-  
-  # Loop over each unique year and compute d_minus_i
-  for (yr in unique(all_data$year)) {
-    # Subset data for this year
-    sub_data <- all_data %>% filter(year == yr)
-    
-    # Check for missing death rates
-    if (any(is.na(sub_data$death_rates_per_100_k))) {
-      warning(paste("Missing death_rates_per_100_k for year", yr, ". Skipping computation for this year."))
-      next
-    }
-    
-    # Align subset with A_ij
-    idx <- match(sub_data$GEOID, rownames(A_ij))
-    if (any(is.na(idx))) {
-      warning(paste("Some GEOID values for year", yr, "are missing in the distance matrix."))
-      next
-    }
-    
-    # Submatrix for the year
-    A_ij_sub <- A_ij[idx, idx, drop = FALSE]
-    
-    # Check dimensions
-    y <- sub_data$death_rates_per_100_k
-    if (nrow(A_ij_sub) != length(y)) {
-      stop(paste("Dimension mismatch for year", yr, ": A_ij_sub rows =", nrow(A_ij_sub),
-                 "and y length =", length(y)))
-    }
-    
-    # d_minus_i = A_ij_sub %*% y
-    d_minus_i_vec <- A_ij_sub %*% as.matrix(y)
-    
-    # Store in the original data frame
-    all_data$d_minus_i[which(all_data$year == yr)] <- d_minus_i_vec
-  }
-  
-  return(all_data)
-}
-
-my_data_with_spatial <- calculateSpatialProximity_by_year(all_data)
+# ### spatial proximity ####
+# calculateSpatialProximity_by_year <- function(all_data) {
+#   # Check for missing data
+#   if (any(is.na(all_data$GEOID) | is.na(all_data$Longitude) | is.na(all_data$Latitude))) {
+#     stop("Missing GEOID, Longitude, or Latitude in the data. Please clean the data.")
+#   }
+#   
+#   # Extract unique counties for the distance matrix
+#   unique_counties <- all_data %>%
+#     distinct(GEOID, Longitude, Latitude) %>%
+#     arrange(GEOID)
+#   
+#   # Compute geodesic distance in km
+#   dist_km <- geodist::geodist(unique_counties[, c("Longitude", "Latitude")],
+#                               measure = "geodesic") / 1000
+#   
+#   # Implement a_ij = 1 + 1/d_ij, for i != j
+#   # (Note: if d_ij = 0 for i == j, then we set the diagonal to 0 below)
+#   distance_matrix <- 1 + 1 / dist_km
+#   
+#   # Zero out the diagonal (no self-distance)
+#   diag(distance_matrix) <- 0
+#   
+#   # Normalize each row so rows sum to 1
+#   row_sums <- rowSums(distance_matrix)
+#   if (any(row_sums == 0)) {
+#     warning("Some rows in the distance matrix sum to zero. Check the input data.")
+#     row_sums[row_sums == 0] <- 1  # Avoid division by zero
+#   }
+#   A_ij <- sweep(distance_matrix, 1, row_sums, FUN = "/")
+#   rownames(A_ij) <- unique_counties$GEOID
+#   
+#   # Initialize d_minus_i
+#   all_data$d_minus_i <- NA_real_
+#   
+#   # Loop over each unique year and compute d_minus_i
+#   for (yr in unique(all_data$year)) {
+#     # Subset data for this year
+#     sub_data <- all_data %>% filter(year == yr)
+#     
+#     # Check for missing death rates
+#     if (any(is.na(sub_data$death_rates_per_100_k))) {
+#       warning(paste("Missing death_rates_per_100_k for year", yr, ". Skipping computation for this year."))
+#       next
+#     }
+#     
+#     # Align subset with A_ij
+#     idx <- match(sub_data$GEOID, rownames(A_ij))
+#     if (any(is.na(idx))) {
+#       warning(paste("Some GEOID values for year", yr, "are missing in the distance matrix."))
+#       next
+#     }
+#     
+#     # Submatrix for the year
+#     A_ij_sub <- A_ij[idx, idx, drop = FALSE]
+#     
+#     # Check dimensions
+#     y <- sub_data$death_rates_per_100_k
+#     if (nrow(A_ij_sub) != length(y)) {
+#       stop(paste("Dimension mismatch for year", yr, ": A_ij_sub rows =", nrow(A_ij_sub),
+#                  "and y length =", length(y)))
+#     }
+#     
+#     # d_minus_i = A_ij_sub %*% y
+#     d_minus_i_vec <- A_ij_sub %*% as.matrix(y)
+#     
+#     # Store in the original data frame
+#     all_data$d_minus_i[which(all_data$year == yr)] <- d_minus_i_vec
+#   }
+#   
+#   return(all_data)
+# }
+# 
+# my_data_with_spatial <- calculateSpatialProximity_by_year(all_data)
 
 ### using gravity weights ###
-calculateSpatialProximity_by_year <- function(all_data, alpha = 1) {
-  # 1) Identify unique counties and build one distance matrix
-  #    We assume 'GEOID', 'Longitude', and 'Latitude' are present in 'all_data'.
-  
-  # Extract unique counties for the distance matrix
-  unique_counties <- all_data %>%
-    dplyr::distinct(GEOID, Longitude, Latitude) %>%
-    dplyr::arrange(GEOID)
-  
-  # Compute geodesic distance in kilometers
-  distance_km <- geodist::geodist(unique_counties[, c("Longitude","Latitude")],
-                                  measure = "geodesic") / 1000
-  
-  # 2) Gravity-weighted function: w(d_{ij}) = 1 + 1/(d_{ij}^alpha)
-  #    If distance is zero (for the diagonal or otherwise), we handle it separately below.
-  #    We'll first transform only off-diagonal entries.
-  
-  # Initialize a matrix of the same size
-  gravity_matrix <- matrix(0, nrow = nrow(distance_km), ncol = ncol(distance_km))
-  
-  # Fill off-diagonal elements with 1 + 1/d^alpha
-  # Avoid dividing by zero on the diagonal by skipping those indices
-  for (i in seq_len(nrow(distance_km))) {
-    for (j in seq_len(ncol(distance_km))) {
-      if (i != j) {
-        # distance_km[i,j] is > 0 for distinct counties
-        gravity_matrix[i,j] <- 1 + 1 / (distance_km[i,j]^alpha)
-      }
+
+
+# Extract unique counties for the distance matrix
+unique_counties <- all_data %>%
+  dplyr::distinct(GEOID, Longitude, Latitude) %>%
+  dplyr::arrange(GEOID)
+
+# Compute geodesic distance in kilometers
+distance_km <- geodist::geodist(unique_counties[, c("Longitude","Latitude")],
+                                measure = "geodesic") / 1000
+
+# 2) Gravity-weighted function: w(d_{ij}) = 1 + 1/(d_{ij}^alpha)
+#    If distance is zero (for the diagonal or otherwise), we handle it separately below.
+#    We'll first transform only off-diagonal entries.
+
+# Initialize a matrix of the same size
+gravity_matrix <- matrix(0, nrow = nrow(distance_km), ncol = ncol(distance_km))
+
+# Fill off-diagonal elements with 1 + 1/d^alpha
+# Avoid dividing by zero on the diagonal by skipping those indices
+for (i in seq_len(nrow(distance_km))) {
+  for (j in seq_len(ncol(distance_km))) {
+    if (i != j) {
+      # distance_km[i,j] is > 0 for distinct counties
+      gravity_matrix[i,j] <- 1 + 1 / (distance_km[i,j]^0.1)
     }
   }
-  
-  # 3) Zero out diagonal (no self-distance weighting)
-  diag(gravity_matrix) <- 0
-  
-  # Optionally assign row/column names
-  rownames(gravity_matrix) <- unique_counties$GEOID
-  colnames(gravity_matrix) <- unique_counties$GEOID
-  
-  # 4) Normalize each row to create A_{i,j}
-  row_sums <- rowSums(gravity_matrix)
-  A_ij <- sweep(gravity_matrix, 1, row_sums, FUN = "/")
-  diag(A_ij) <- 0
-  
-  # 5) Prepare to store d_minus_i in the original data
-  all_data$d_minus_i <- NA_real_
-  
-  # 6) Loop over each unique year and compute d_minus_i
-  for (yr in unique(all_data$year)) {
-    
-    # Subset data for this year
-    sub_data <- all_data %>% dplyr::filter(year == yr)
-    
-    # Let 'death_rates_per_100_k' be the outcome
-    # (Adjust the column name if yours differs.)
-    y <- sub_data$death_rates_per_100_k
-    
-    # Align the subset with rows/columns of A_ij
-    idx <- match(sub_data$GEOID, rownames(A_ij))
-    
-    # Create a submatrix for these counties
-    A_ij_sub <- A_ij[idx, idx, drop = FALSE]
-    
-    # Multiply A_ij_sub by the outcome vector 'y'
-    # Column j in A_ij_sub aligns with sub_data$GEOID[j]
-    d_minus_i_vec <- A_ij_sub %*% as.matrix(y)
-    
-    # Insert into all_data$d_minus_i for these counties, this year
-    all_data$d_minus_i[all_data$year == yr] <- d_minus_i_vec
-  }
-  
-  return(all_data)
 }
 
+# 3) Zero out diagonal (no self-distance weighting)
+diag(gravity_matrix) <- 0
 
-my_data_with_spatial_g <- calculateSpatialProximity_by_year(
-  all_data = my_data_with_spatial,
-  alpha = 0.1
+# Optionally assign row/column names
+rownames(gravity_matrix) <- unique_counties$GEOID
+colnames(gravity_matrix) <- unique_counties$GEOID
+
+# 4) Normalize each row to create A_{i,j}
+row_sums <- rowSums(gravity_matrix)
+A_ij <- sweep(gravity_matrix, 1, row_sums, FUN = "/")
+diag(A_ij) <- 0
+
+
+### calculating d_minus_i
+
+results_list_spatial <- list()  # Store results for each year
+
+for (yr in unique(suicide_mortality$year)) {
+  
+  # Subset data for this year
+  sub_data <- all_data %>% filter(year == yr)
+  
+  # Align the subset with the rows/columns of `A_ij`
+  idx <- match(sub_data$GEOID, rownames(A_ij))  # Match row order
+  
+  # Create a submatrix that includes only relevant counties for this year
+  A_ij_sub <- A_ij[idx, idx, drop = FALSE]
+  
+  # Extract the outcome vector (e.g., death rates per 100k)
+  y <- sub_data$death_rates_per_100_k
+  
+  # Ensure alignment of outcome vector
+  y <- as.matrix(y)
+  
+  # Compute d_minus_i as the weighted sum of neighbors' outcomes
+  d_minus_i_vec <- A_ij_sub %*% y
+  
+  # Add the computed `d_minus_i` back to the subset data
+  sub_data$d_minus_i <- as.numeric(d_minus_i_vec)
+  
+  # Store the updated subset data for this year in results list
+  results_list_spatial[[as.character(yr)]] <- sub_data
+}
+
+# Combine all yearly subsets into one final dataset
+my_data_with_spatial_g <- bind_rows(results_list_spatial)
+
+
+
+
+# calculateSpatialProximity_by_year <- function(all_data, alpha = 1) {
+#   # 1) Identify unique counties and build one distance matrix
+#   #    We assume 'GEOID', 'Longitude', and 'Latitude' are present in 'all_data'.
+#   
+#   # Extract unique counties for the distance matrix
+#   unique_counties <- all_data %>%
+#     dplyr::distinct(GEOID, Longitude, Latitude) %>%
+#     dplyr::arrange(GEOID)
+#   
+#   # Compute geodesic distance in kilometers
+#   distance_km <- geodist::geodist(unique_counties[, c("Longitude","Latitude")],
+#                                   measure = "geodesic") / 1000
+#   
+#   # 2) Gravity-weighted function: w(d_{ij}) = 1 + 1/(d_{ij}^alpha)
+#   #    If distance is zero (for the diagonal or otherwise), we handle it separately below.
+#   #    We'll first transform only off-diagonal entries.
+#   
+#   # Initialize a matrix of the same size
+#   gravity_matrix <- matrix(0, nrow = nrow(distance_km), ncol = ncol(distance_km))
+#   
+#   # Fill off-diagonal elements with 1 + 1/d^alpha
+#   # Avoid dividing by zero on the diagonal by skipping those indices
+#   for (i in seq_len(nrow(distance_km))) {
+#     for (j in seq_len(ncol(distance_km))) {
+#       if (i != j) {
+#         # distance_km[i,j] is > 0 for distinct counties
+#         gravity_matrix[i,j] <- 1 + 1 / (distance_km[i,j]^alpha)
+#       }
+#     }
+#   }
+#   
+#   # 3) Zero out diagonal (no self-distance weighting)
+#   diag(gravity_matrix) <- 0
+#   
+#   # Optionally assign row/column names
+#   rownames(gravity_matrix) <- unique_counties$GEOID
+#   colnames(gravity_matrix) <- unique_counties$GEOID
+#   
+#   # 4) Normalize each row to create A_{i,j}
+#   row_sums <- rowSums(gravity_matrix)
+#   A_ij <- sweep(gravity_matrix, 1, row_sums, FUN = "/")
+#   diag(A_ij) <- 0
+#   
+#   # 5) Prepare to store d_minus_i in the original data
+#   all_data$d_minus_i <- NA_real_
+#   
+#   # 6) Loop over each unique year and compute d_minus_i
+#   for (yr in unique(all_data$year)) {
+#     
+#     # Subset data for this year
+#     sub_data <- all_data %>% dplyr::filter(year == yr)
+#     
+#     # Let 'death_rates_per_100_k' be the outcome
+#     # (Adjust the column name if yours differs.)
+#     y <- sub_data$death_rates_per_100_k
+#     
+#     # Align the subset with rows/columns of A_ij
+#     idx <- match(sub_data$GEOID, rownames(A_ij))
+#     
+#     # Create a submatrix for these counties
+#     A_ij_sub <- A_ij[idx, idx, drop = FALSE]
+#     
+#     # Multiply A_ij_sub by the outcome vector 'y'
+#     # Column j in A_ij_sub aligns with sub_data$GEOID[j]
+#     d_minus_i_vec <- A_ij_sub %*% as.matrix(y)
+#     
+#     # Insert into all_data$d_minus_i for these counties, this year
+#     all_data$d_minus_i[all_data$year == yr] <- d_minus_i_vec
+#   }
+#   
+#   return(all_data)
+# }
+# 
+# 
+# my_data_with_spatial_g <- calculateSpatialProximity_by_year(
+#   all_data = my_data_with_spatial,
+#   alpha = 0.1
+# )
+
+### population density ###
+counties <- counties(year = 2018, cb = TRUE)
+# Calculate area in square kilometers
+counties <- st_transform(counties, crs = 5070)  # Transform to Albers Equal Area for accurate area calculation
+counties <- counties %>%
+  mutate(area_sq_km = as.numeric(st_area(geometry)) / 1e6)  # Convert area to square kilometers
+
+counties <- counties %>% filter(GEOID %in% my_data_with_spatial_g$GEOID) %>% select(c("GEOID", "area_sq_km"))
+my_data_with_spatial_g <- merge(my_data_with_spatial_g,counties,by="GEOID")
+my_data_with_spatial_g <- my_data_with_spatial_g %>% mutate(population_density=ACS_TOT_POP_WT/area_sq_km)
+
+
+### lets us see the year wise variation ##
+
+
+
+
+#### frequent mental health distress rate data #####
+
+# Define a list of years and their corresponding URLs
+mhd_2010 <- read.csv("https://www.countyhealthrankings.org/sites/default/files/analytic_data2010.csv")
+mhd_2011 <- read.csv("https://www.countyhealthrankings.org/sites/default/files/analytic_data2011.csv")
+mhd_2012 <- read.csv("https://www.countyhealthrankings.org/sites/default/files/analytic_data2012.csv")
+mhd_2013 <- read.csv("https://www.countyhealthrankings.org/sites/default/files/analytic_data2013.csv")
+mhd_2014 <- read.csv("https://www.countyhealthrankings.org/sites/default/files/analytic_data2014.csv")
+mhd_2015 <- read.csv("https://www.countyhealthrankings.org/sites/default/files/analytic_data2015.csv")
+mhd_2016 <- read.csv("https://www.countyhealthrankings.org/sites/default/files/analytic_data2016.csv")
+mhd_2017 <- read.csv("https://www.countyhealthrankings.org/sites/default/files/analytic_data2017.csv")
+mhd_2018 <- read.csv("https://www.countyhealthrankings.org/sites/default/files/analytic_data2018_0.csv")
+mhd_2019 <- read.csv("https://www.countyhealthrankings.org/sites/default/files/media/document/analytic_data2019.csv")
+mhd_2020 <- read.csv("https://www.countyhealthrankings.org/sites/default/files/media/document/analytic_data2020_0.csv")
+
+# List of datasets with corresponding years
+data_list <- list(
+  "2010" = mhd_2010, "2011" = mhd_2011, "2012" = mhd_2012, "2013" = mhd_2013, 
+  "2014" = mhd_2014, "2015" = mhd_2015, "2016" = mhd_2016, "2017" = mhd_2017, 
+  "2018" = mhd_2018, "2019" = mhd_2019, "2020" = mhd_2020
 )
 
+# Initialize empty list to store processed data
+panel_data_mhd <- list()
+
+# Loop through each dataset
+for (year in names(data_list)) {
+  df <- data_list[[year]]
+  
+  # Check if the required column exists
+  if ("Poor.mental.health.days.raw.value" %in% names(df)) {
+    df <- df %>%
+      select(X5.digit.FIPS.Code, Poor.mental.health.days.raw.value) %>%
+      mutate(Release.Year = as.integer(year))
+    
+    panel_data_mhd[[year]] <- df
+  }
+}
+
+# Combine all years into a single dataframe
+final_panel_data_mhd <- bind_rows(panel_data_mhd)
+
+#### final data mhd ####
+final_panel_data_mhd <- final_panel_data_mhd %>% filter(X5.digit.FIPS.Code %in% my_data_with_spatial_g$GEOID) %>% select(c("X5.digit.FIPS.Code", "Release.Year", "Poor.mental.health.days.raw.value",))
+colnames(final_panel_data_mhd)[1] <- "GEOID"
+colnames(final_panel_data_mhd)[2] <- "year"
+### merging the data ###3
+my_data_with_spatial_g <- merge(my_data_with_spatial_g,final_panel_data_mhd, by=c("GEOID","year"), all=TRUE)
+my_data_with_spatial_g$Poor.mental.health.days.raw.value <- as.numeric(my_data_with_spatial_g$Poor.mental.health.days.raw.value)
+
+
+### finding out for what year and what data points the mental heatlh distress value are not there
+
+missing_summary <- my_data_with_spatial_g %>%
+  select(
+    GEOID, 
+    year, 
+    state, 
+    ACS_MEDIAN_HH_INC,
+    ACS_PCT_UNEMPLOY,
+    Poor.mental.health.days.raw.value
+  ) %>%
+  pivot_longer(
+    cols = c(ACS_MEDIAN_HH_INC, ACS_PCT_UNEMPLOY, Poor.mental.health.days.raw.value),
+    names_to = "variable",
+    values_to = "value"
+  ) %>%
+  filter(is.na(value))
+
+missing_summary
+### imputing the data by mean value per year ###
+
+my_data_with_spatial_g <- my_data_with_spatial_g %>%
+  group_by(year) %>%
+  mutate(
+    ACS_MEDIAN_HH_INC = ifelse(
+      is.na(ACS_MEDIAN_HH_INC),
+      mean(ACS_MEDIAN_HH_INC, na.rm = TRUE),
+      ACS_MEDIAN_HH_INC
+    ),
+    ACS_PCT_UNEMPLOY = ifelse(
+      is.na(ACS_PCT_UNEMPLOY),
+      mean(ACS_PCT_UNEMPLOY, na.rm = TRUE),
+      ACS_PCT_UNEMPLOY
+    ),
+    Poor.mental.health.days.raw.value = ifelse(
+      is.na(Poor.mental.health.days.raw.value),
+      mean(Poor.mental.health.days.raw.value, na.rm = TRUE),
+      Poor.mental.health.days.raw.value
+    )
+  ) %>%
+  ungroup()
+
+
 ### regression ####
+
+### standardized covariates #####
+
+# List of covariates to standardize
+covariates <- c("death_rates_per_100_k", "s_minus_i", "d_minus_i", "ACS_MEDIAN_HH_INC", "ACS_PCT_UNEMPLOY", 
+                "ACS_PCT_LT_HS", "population_density", "Poor.mental.health.days.raw.value")
+
+# min max standardization
+# Define Min-Max scaling function
+min_max_scaled <- function(x) {
+  (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+}
+
+# Apply Min-Max scaling after Z-score standardization
+my_data_with_spatial_g[covariates] <- as.data.frame(lapply(my_data_with_spatial_g[covariates], min_max_scaled))
+
+
+
 ### all years ###
 library(lfe)
-model_felm_entire_united_states<- felm(scale(death_rates_per_100_k)~s_minus_i+ d_minus_i+ACS_MEDIAN_HH_INC+
-                                          race_cat+ACS_PCT_UNEMPLOY+ACS_PCT_LT_HS
-                                     |GEOID+year,data=my_data_with_spatial,weights = my_data_with_spatial$ACS_TOT_POP_WT)
-summary(model_felm_entire_united_states)
+model_felm_entire_united_states<- felm(death_rates_per_100_k~ s_minus_i+ d_minus_i+ACS_MEDIAN_HH_INC+
+                                          race_cat+ACS_PCT_UNEMPLOY+ACS_PCT_LT_HS+population_density+Poor.mental.health.days.raw.value
+                                     |GEOID+year,data=my_data_with_spatial_g,weights =my_data_with_spatial_g$ACS_TOT_POP_WT)
+summary(model_felm_entire_united_states,cluster = my_data_with_spatial_g[, c("state", "year")])
+
+
+# Extract residuals
+res <- residuals(model_felm_entire_united_states)
+
+# Q–Q plot
+qqnorm(res)
+qqline(res)
+
+# Histogram
+hist(res, breaks = 30, main="Residuals", xlab="")
+
+# Shapiro-Wilk test for normality
+shapiro.test(res)
+
+
+
+### writing the csv ####
 write.csv(my_data_with_spatial, 'spatial_social_proximity_suicide_mortality_2010_2020_cdc_wonder_data.csv')
 write.csv(my_data_with_spatial_g, 'spatial_social_proximity_suicide_mortality_2010_2020_cdc_wonder_data_gravity_weights.csv')
 
+###running the spatial panel model ####
+my_data_with_spatial <- my_data_with_spatial_g %>%
+  group_by(year) %>%
+  mutate(ACS_MEDIAN_HH_INC = ifelse(is.na(ACS_MEDIAN_HH_INC), 
+                                    predict(lm(ACS_MEDIAN_HH_INC ~ ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS, data = ., na.action = na.exclude)), 
+                                    ACS_MEDIAN_HH_INC)) %>%
+  ungroup()
+my_data_with_spatial <- my_data_with_spatial %>%
+  group_by(year) %>%
+  mutate(ACS_PCT_UNEMPLOY = ifelse(is.na(ACS_PCT_UNEMPLOY), 
+                                   mean(ACS_PCT_UNEMPLOY, na.rm = TRUE), 
+                                   ACS_PCT_UNEMPLOY)) %>%
+  ungroup()
+### finding duplicates ###
+duplicates <- my_data_with_spatial %>%
+  group_by(GEOID, year) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  filter(n > 1)
+
+print(duplicates) # Should be empty
+
+### checking if the lw_1 is correct or not ###
+# Convert listw object to a standard matrix
+lw_1_mat <- as.matrix(w_ij_sub, "sparseMatrix")
 
 
 
+my_data_with_spatial_g <- my_data_with_spatial_g[,-16]
+
+
+# Fit the Spatial Dynamic Panel Data Model on the filtered dataset
+model_sac <- SDPDm(formula = death_rates_per_100_k ~ d_minus_i+race_cat+ACS_MEDIAN_HH_INC + ACS_PCT_UNEMPLOY 
+  + ACS_PCT_LT_HS + race_cat +population_density+Poor.mental.health.days.raw.value,
+  data = my_data_with_spatial_g,
+  W = lw_1_mat,  # Spatial weights matrix
+  index = c("GEOID", "year"),
+  model = "sar",  # Spatial autoregressive model
+  effect = "twoways",  # Two-way fixed effects (individual + time)
+  LYtrans = TRUE,  # Lee-Yu transformation for within transformation
+  dynamic = TRUE,  # Include time-lagged dependence
+  tlaginfo = list(ind = NULL, tl = TRUE, stl = TRUE)  # Include time & spatial lags
+)
+
+# Display Model Summary
+summary(model_sac, robust=TRUE)
+
+
+# ### without lag ###
+# model_sac_without_lag <- SDPDm(formula = log(death_rates_per_100_k) ~ d_minus_i+race_cat+ACS_MEDIAN_HH_INC + ACS_PCT_UNEMPLOY 
+#                    + ACS_PCT_LT_HS + race_cat +population_density+Poor.mental.health.days.raw.value,
+#                    data = my_data_with_spatial_g,
+#                    W = lw_1_mat,  # Spatial weights matrix
+#                    index = c("GEOID", "year"),
+#                    model = "sar",  # Spatial autoregressive model
+#                    effect = "twoways",  # Two-way fixed effects (individual + time)
+#                    LYtrans = TRUE,  # Lee-Yu transformation for within transformation
+#                    dynamic = FALSE,  # Include time-lagged dependence
+#                    tlaginfo = list(ind = NULL, tl = FALSE, stl = TRUE)  # Include time & spatial lags
+# )
+# 
+# # Display Model Summary
+# summary(model_sac_without_lag)
+# 
+# 
+# ### correlation plot ####
+# 
+# library(ggplot2)
+# library(GGally)
+# 
+# 
+# # Select the variables from the dataset
+# variables <- c("death_rates_per_100_k", "s_minus_i", "d_minus_i")
+# 
+# # Create a new data frame with only the selected variables
+# df_selected <- my_data_with_spatial_g[variables]
+# 
+# # Create the conditional scatterplot matrix
+# ggpairs(df_selected, 
+#         lower = list(continuous = wrap("points", alpha = 0.8, color="red")),
+#         diag = list(continuous = wrap("barDiag", fill="red", bins=10)),
+#         upper = list(continuous = wrap("smooth", method = "lm", color="red", fullrange = TRUE)))+
+#   theme_minimal()
+# 
+# 
+# 
+# #### log conversion #####
+# df_selected_log <- df_selected
+# df_selected_log[] <- lapply(df_selected_log, function(x) if(is.numeric(x)) log1p(x) else x)
+# 
+# 
+# # Create the conditional scatterplot matrix
+# ggpairs(df_selected_log, 
+#         lower = list(continuous = wrap("points", alpha = 0.8, color="red")),
+#         diag = list(continuous = wrap("barDiag", fill="red", bins=10)),
+#         upper = list(continuous = wrap("smooth", method = "lm", color="red", fullrange = TRUE)))+
+#   theme_minimal()
