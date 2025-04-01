@@ -53,15 +53,15 @@ for (f in files) {
   tmp <- read.csv(f, colClasses = c(COUNTYFIPS = "character"))
   
   # Create race_cat column
-  if (all(c("ACS_PCT_WHITE_NONHISP", "ACS_PCT_BLACK_NONHISP", 
+  if (all(c("ACS_PCT_WHITE", "ACS_PCT_BLACK", "ACS_PCT_WHITE_NONHISP", "ACS_PCT_BLACK_NONHISP", 
             "ACS_PCT_HISPANIC", "ACS_PCT_ASIAN_NONHISP",
             "ACS_PCT_AIAN_NONHISP", "ACS_PCT_NHPI_NONHISP",
             "ACS_PCT_MULT_RACE_NONHISP") %in% names(tmp))) {
     
-    group_names <- c("WhiteNH", "BlackNH", "Hispanic", "AsianNH", "AIANNH", "NHPINH", "MultiNH")
+    group_names <- c("White", "Black", "WhiteNH", "BlackNH", "Hispanic", "AsianNH", "AIANNH", "NHPINH", "MultiNH")
     
     tmp$race_cat <- apply(
-      tmp[, c("ACS_PCT_WHITE_NONHISP", "ACS_PCT_BLACK_NONHISP", 
+      tmp[, c("ACS_PCT_WHITE", "ACS_PCT_BLACK",  "ACS_PCT_WHITE_NONHISP", "ACS_PCT_BLACK_NONHISP", 
               "ACS_PCT_HISPANIC", "ACS_PCT_ASIAN_NONHISP",
               "ACS_PCT_AIAN_NONHISP", "ACS_PCT_NHPI_NONHISP",
               "ACS_PCT_MULT_RACE_NONHISP")],
@@ -69,8 +69,8 @@ for (f in files) {
       function(x) group_names[which.max(x)]
     )
     
-    tmp$race_cat[tmp$race_cat %in% c("AsianNH", "AIANNH", "NHPINH", "MultiNH")] <- "OtherNH"
-    tmp$race_cat <- factor(tmp$race_cat, levels = c("WhiteNH", "BlackNH", "Hispanic", "OtherNH"))
+    tmp$race_cat[tmp$race_cat %in% c("WhiteNH", "BlackNH", "Hispanic","AsianNH", "AIANNH", "NHPINH", "MultiNH")] <- "Other"
+    tmp$race_cat <- factor(tmp$race_cat, levels = c("White", "Black", "Other"))
   } else {
     tmp$race_cat <- NA
   }
@@ -92,24 +92,29 @@ my_panel <- do.call(
       d$YEAR <- as.numeric(yr)
     }
     
-    d %>%
-      select(
-        COUNTYFIPS,
-        YEAR,
-        ACS_TOT_POP_WT, 
-        race_cat,
-        ACS_MEDIAN_HH_INC,
-        ACS_PCT_UNEMPLOY,
-        ACS_PCT_LT_HS
-      )
+    required_vars <- c(
+      "COUNTYFIPS", "YEAR", "ACS_TOT_POP_WT", "race_cat", 
+      "ACS_MEDIAN_HH_INC", "ACS_PCT_UNEMPLOY", "ACS_PCT_LT_HS", 
+      "ACS_PCT_AGE_18_44", "ACS_PCT_AGE_45_64", 
+      "ACS_PCT_ENGL_NOT_WELL", "SAHIE_PCT_UNINSURED64", "ACS_PCT_UNINSURED"
+    )
+    
+    vars_present <- intersect(required_vars, names(d))
+    
+    for (v in setdiff(required_vars, vars_present)) {
+      d[[v]] <- NA
+    }
+    
+    d %>% select(all_of(required_vars))
   })
 )
 
-# Check the structure of COUNTYFIPS
-str(my_panel$COUNTYFIPS)  # Should be character with padded zeros intact
+# Confirm COUNTYFIPS is character
+str(my_panel$COUNTYFIPS)
 
-### filtering the counties for the contiguous US ###
-my_panel <- my_panel %>% filter(COUNTYFIPS %in% df_suicide_mortality_2010_2020$FIPS ) 
+# 3) Filter to contiguous US counties
+my_panel <- my_panel %>% 
+  filter(COUNTYFIPS %in% df_suicide_mortality_2010_2020$FIPS)
 
 ### merging the data ###
 suicide_mortality <- df_suicide_mortality_2010_2020 %>%
@@ -329,6 +334,7 @@ missing_coords
 
 
 # Extract unique counties for the distance matrix
+# Extract unique counties for the distance matrix
 unique_counties <- all_data %>%
   dplyr::distinct(GEOID, Longitude, Latitude) %>%
   dplyr::arrange(GEOID)
@@ -337,26 +343,12 @@ unique_counties <- all_data %>%
 distance_km <- geodist::geodist(unique_counties[, c("Longitude","Latitude")],
                                 measure = "geodesic") / 1000
 
-# 2) Gravity-weighted function: w(d_{ij}) = 1 + 1/(d_{ij}^alpha)
+# 2) Gravity-weighted function: w(d_{ij}) = 1/(d_{ij}^alpha)
 #    If distance is zero (for the diagonal or otherwise), we handle it separately below.
 #    We'll first transform only off-diagonal entries.
 
 # Initialize a matrix of the same size
-gravity_matrix <- matrix(0, nrow = nrow(distance_km), ncol = ncol(distance_km))
-
-# Fill off-diagonal elements with 1 + 1/d^alpha
-# Avoid dividing by zero on the diagonal by skipping those indices
-for (i in seq_len(nrow(distance_km))) {
-  for (j in seq_len(ncol(distance_km))) {
-    if (i != j) {
-      # distance_km[i,j] is > 0 for distinct counties
-      gravity_matrix[i,j] <- 1 + 1 / (distance_km[i,j]^0.1)
-    }
-  }
-}
-
-# 3) Zero out diagonal (no self-distance weighting)
-diag(gravity_matrix) <- 0
+gravity_matrix <- InvDistMat(distance_km)
 
 # Optionally assign row/column names
 rownames(gravity_matrix) <- unique_counties$GEOID
@@ -401,7 +393,6 @@ for (yr in unique(suicide_mortality$year)) {
 
 # Combine all yearly subsets into one final dataset
 my_data_with_spatial_g <- bind_rows(results_list_spatial)
-
 
 
 
@@ -596,12 +587,21 @@ my_data_with_spatial_g <- my_data_with_spatial_g %>%
 
 
 ### regression ####
+my_data_with_spatial_g <- my_data_with_spatial_g %>%
+  mutate(percentage_uninsured = coalesce(ACS_PCT_UNINSURED, SAHIE_PCT_UNINSURED64))
+
 
 ### standardized covariates #####
 
 # List of covariates to standardize
-covariates <- c("death_rates_per_100_k", "s_minus_i", "d_minus_i", "ACS_MEDIAN_HH_INC", "ACS_PCT_UNEMPLOY", 
-                "ACS_PCT_LT_HS", "population_density", "Poor.mental.health.days.raw.value")
+covariates <- c(
+  "death_rates_per_100_k", "s_minus_i", "d_minus_i", 
+  "ACS_MEDIAN_HH_INC", "ACS_PCT_UNEMPLOY", "ACS_PCT_LT_HS", 
+  "population_density", "Poor.mental.health.days.raw.value", 
+  "ACS_PCT_AGE_18_44", "ACS_PCT_AGE_45_64", "ACS_PCT_ENGL_NOT_WELL", 
+  "percentage_uninsured"
+)
+
 
 # min max standardization
 # Define Min-Max scaling function
@@ -612,11 +612,35 @@ min_max_scaled <- function(x) {
 # Apply Min-Max scaling after Z-score standardization
 my_data_with_spatial_g[covariates] <- as.data.frame(lapply(my_data_with_spatial_g[covariates], min_max_scaled))
 
+### making the correlation plot ###
+
+library(ggplot2)
+library(GGally)
+
+
+# Select the variables from the dataset
+variables <- c("death_rates_per_100_k", "s_minus_i", "d_minus_i")
+
+# Create a new data frame with only the selected variables
+df_selected <- my_data_with_spatial_g[variables]
+
+# Create the conditional scatterplot matrix
+ggpairs(df_selected,
+        lower = list(continuous = wrap("points", alpha = 0.8, color="red")),
+        diag = list(continuous = wrap("barDiag", fill="red", bins=10)),
+        upper = list(continuous = wrap("smooth", method = "lm", color="red", fullrange = TRUE)))+
+  theme_minimal()
+
+
+
+
+
 
 
 ### all years ###
 library(lfe)
 model_felm_entire_united_states<- felm(death_rates_per_100_k~ s_minus_i+ d_minus_i+ACS_MEDIAN_HH_INC+
+                                         ACS_PCT_AGE_18_44+ACS_PCT_AGE_45_64+ACS_PCT_ENGL_NOT_WELL+percentage_uninsured+
                                           race_cat+ACS_PCT_UNEMPLOY+ACS_PCT_LT_HS+population_density+Poor.mental.health.days.raw.value
                                      |GEOID+year,data=my_data_with_spatial_g,weights =my_data_with_spatial_g$ACS_TOT_POP_WT)
 summary(model_felm_entire_united_states,cluster = my_data_with_spatial_g[, c("state", "year")])
@@ -638,102 +662,5 @@ shapiro.test(res)
 
 
 ### writing the csv ####
-write.csv(my_data_with_spatial, 'spatial_social_proximity_suicide_mortality_2010_2020_cdc_wonder_data.csv')
 write.csv(my_data_with_spatial_g, 'spatial_social_proximity_suicide_mortality_2010_2020_cdc_wonder_data_gravity_weights.csv')
 
-###running the spatial panel model ####
-my_data_with_spatial <- my_data_with_spatial_g %>%
-  group_by(year) %>%
-  mutate(ACS_MEDIAN_HH_INC = ifelse(is.na(ACS_MEDIAN_HH_INC), 
-                                    predict(lm(ACS_MEDIAN_HH_INC ~ ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS, data = ., na.action = na.exclude)), 
-                                    ACS_MEDIAN_HH_INC)) %>%
-  ungroup()
-my_data_with_spatial <- my_data_with_spatial %>%
-  group_by(year) %>%
-  mutate(ACS_PCT_UNEMPLOY = ifelse(is.na(ACS_PCT_UNEMPLOY), 
-                                   mean(ACS_PCT_UNEMPLOY, na.rm = TRUE), 
-                                   ACS_PCT_UNEMPLOY)) %>%
-  ungroup()
-### finding duplicates ###
-duplicates <- my_data_with_spatial %>%
-  group_by(GEOID, year) %>%
-  summarise(n = n(), .groups = "drop") %>%
-  filter(n > 1)
-
-print(duplicates) # Should be empty
-
-### checking if the lw_1 is correct or not ###
-# Convert listw object to a standard matrix
-lw_1_mat <- as.matrix(w_ij_sub, "sparseMatrix")
-
-
-
-my_data_with_spatial_g <- my_data_with_spatial_g[,-16]
-
-
-# Fit the Spatial Dynamic Panel Data Model on the filtered dataset
-model_sac <- SDPDm(formula = death_rates_per_100_k ~ d_minus_i+race_cat+ACS_MEDIAN_HH_INC + ACS_PCT_UNEMPLOY 
-  + ACS_PCT_LT_HS + race_cat +population_density+Poor.mental.health.days.raw.value,
-  data = my_data_with_spatial_g,
-  W = lw_1_mat,  # Spatial weights matrix
-  index = c("GEOID", "year"),
-  model = "sar",  # Spatial autoregressive model
-  effect = "twoways",  # Two-way fixed effects (individual + time)
-  LYtrans = TRUE,  # Lee-Yu transformation for within transformation
-  dynamic = TRUE,  # Include time-lagged dependence
-  tlaginfo = list(ind = NULL, tl = TRUE, stl = TRUE)  # Include time & spatial lags
-)
-
-# Display Model Summary
-summary(model_sac, robust=TRUE)
-
-
-# ### without lag ###
-# model_sac_without_lag <- SDPDm(formula = log(death_rates_per_100_k) ~ d_minus_i+race_cat+ACS_MEDIAN_HH_INC + ACS_PCT_UNEMPLOY 
-#                    + ACS_PCT_LT_HS + race_cat +population_density+Poor.mental.health.days.raw.value,
-#                    data = my_data_with_spatial_g,
-#                    W = lw_1_mat,  # Spatial weights matrix
-#                    index = c("GEOID", "year"),
-#                    model = "sar",  # Spatial autoregressive model
-#                    effect = "twoways",  # Two-way fixed effects (individual + time)
-#                    LYtrans = TRUE,  # Lee-Yu transformation for within transformation
-#                    dynamic = FALSE,  # Include time-lagged dependence
-#                    tlaginfo = list(ind = NULL, tl = FALSE, stl = TRUE)  # Include time & spatial lags
-# )
-# 
-# # Display Model Summary
-# summary(model_sac_without_lag)
-# 
-# 
-# ### correlation plot ####
-# 
-# library(ggplot2)
-# library(GGally)
-# 
-# 
-# # Select the variables from the dataset
-# variables <- c("death_rates_per_100_k", "s_minus_i", "d_minus_i")
-# 
-# # Create a new data frame with only the selected variables
-# df_selected <- my_data_with_spatial_g[variables]
-# 
-# # Create the conditional scatterplot matrix
-# ggpairs(df_selected, 
-#         lower = list(continuous = wrap("points", alpha = 0.8, color="red")),
-#         diag = list(continuous = wrap("barDiag", fill="red", bins=10)),
-#         upper = list(continuous = wrap("smooth", method = "lm", color="red", fullrange = TRUE)))+
-#   theme_minimal()
-# 
-# 
-# 
-# #### log conversion #####
-# df_selected_log <- df_selected
-# df_selected_log[] <- lapply(df_selected_log, function(x) if(is.numeric(x)) log1p(x) else x)
-# 
-# 
-# # Create the conditional scatterplot matrix
-# ggpairs(df_selected_log, 
-#         lower = list(continuous = wrap("points", alpha = 0.8, color="red")),
-#         diag = list(continuous = wrap("barDiag", fill="red", bins=10)),
-#         upper = list(continuous = wrap("smooth", method = "lm", color="red", fullrange = TRUE)))+
-#   theme_minimal()
