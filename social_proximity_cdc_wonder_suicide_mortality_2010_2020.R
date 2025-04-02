@@ -146,7 +146,8 @@ suicide_mortality <- left_join(suicide_mortality,geoid_lat_lng, by=c("FIPS"="GEO
 suicide_mortality <- suicide_mortality %>% mutate(death_rates_per_100_k = (deaths/ACS_TOT_POP_WT)*100000)
 ### verifying the panel data is complete ##### 
 # Define FIPS codes to remove (historical changes)
-fips_to_remove <- c("02158", "02261", "46102")
+# 15005 does not have complete set of neighbors necessary for our analysis
+fips_to_remove <- c("02158", "02261", "46102", "15005")
 
 # Remove these FIPS from the dataset
 suicide_mortality <- suicide_mortality %>% 
@@ -203,6 +204,7 @@ diag(cumulative_sci_weighted_normalized) <- 0  # Ensure no self-loops
 
 # Store the normalized matrix as `w_i_j`
 w_i_j <- cumulative_sci_weighted_normalized
+
 
 # Loop over each unique year and compute `s_minus_i`
 results_list <- list()  # Store results for each year
@@ -634,9 +636,6 @@ ggpairs(df_selected,
 
 
 
-
-
-
 ### all years ###
 library(lfe)
 model_felm_entire_united_states<- felm(death_rates_per_100_k~ s_minus_i+ d_minus_i+ACS_MEDIAN_HH_INC+
@@ -664,3 +663,12 @@ shapiro.test(res)
 ### writing the csv ####
 write.csv(my_data_with_spatial_g, 'spatial_social_proximity_suicide_mortality_2010_2020_cdc_wonder_data_gravity_weights.csv')
 
+lw_1_social <- mat2listw(w_i_j, style='W')
+lw_2_spatial <- mat2listw(A_ij, style='W')
+
+
+saveRDS(lw_1_social, file="lw_1_entire_us.rds")
+saveRDS(lw_2_spatial, file="lw_1_entirelw_2_spatial_us.rds")
+
+write.csv(w_i_j,'w_i_j_social_weights.csv')
+write.csv(A_ij, 'a_i_j_spatial_weights.csv')
