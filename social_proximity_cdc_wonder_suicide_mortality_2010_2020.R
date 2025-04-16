@@ -37,47 +37,42 @@ years <- 2010:2020
 # Define the data path
 data_path <- "C:/Users/kusha/Desktop/Suide Ideation Data Request Form/suicide-ideation-social-networks/SDOH_Covariates/sdoh_csvs"
 
-# 1) Read in all files named sdoh_####.csv
+# 1) Enumerate yearly SDOH files
 files <- list.files(
-  path = data_path, 
-  pattern = "^sdoh_\\d{4}\\.csv$",  # Match files like sdoh_2010.csv
+  path = data_path,
+  pattern = "^sdoh_\\d{4}\\.csv$",          # sdoh_2010.csv, sdoh_2011.csv, ...
   full.names = TRUE
 )
 
-# Iterate over files and process them
+# 2) Loop over files, construct race & ethnicity proportions
 for (f in files) {
-  # Extract year from the filename, e.g., "sdoh_2010.csv" -> "2010"
-  year <- sub(".*sdoh_(\\d{4}).*", "\\1", basename(f))  # Corrected substitution pattern
   
-  # Read the CSV while ensuring COUNTYFIPS is read as a character column
+  year <- sub(".*sdoh_(\\d{4}).*", "\\1", basename(f))
+  
+  # Read as data frame with COUNTYFIPS preserved as character
   tmp <- read.csv(f, colClasses = c(COUNTYFIPS = "character"))
   
-  # Create race_cat column
-  if (all(c("ACS_PCT_WHITE", "ACS_PCT_BLACK", "ACS_PCT_WHITE_NONHISP", "ACS_PCT_BLACK_NONHISP", 
-            "ACS_PCT_HISPANIC", "ACS_PCT_ASIAN_NONHISP",
-            "ACS_PCT_AIAN_NONHISP", "ACS_PCT_NHPI_NONHISP",
-            "ACS_PCT_MULT_RACE_NONHISP") %in% names(tmp))) {
-    
-    group_names <- c("White", "Black", "WhiteNH", "BlackNH", "Hispanic", "AsianNH", "AIANNH", "NHPINH", "MultiNH")
-    
-    tmp$race_cat <- apply(
-      tmp[, c("ACS_PCT_WHITE", "ACS_PCT_BLACK",  "ACS_PCT_WHITE_NONHISP", "ACS_PCT_BLACK_NONHISP", 
-              "ACS_PCT_HISPANIC", "ACS_PCT_ASIAN_NONHISP",
-              "ACS_PCT_AIAN_NONHISP", "ACS_PCT_NHPI_NONHISP",
-              "ACS_PCT_MULT_RACE_NONHISP")],
-      1,
-      function(x) group_names[which.max(x)]
-    )
-    
-    tmp$race_cat[tmp$race_cat %in% c("WhiteNH", "BlackNH", "Hispanic","AsianNH", "AIANNH", "NHPINH", "MultiNH")] <- "Other"
-    tmp$race_cat <- factor(tmp$race_cat, levels = c("White", "Black", "Other"))
-  } else {
-    tmp$race_cat <- NA
-  }
+  # ---- Create proportion (0–1) covariates ----------------------------------
+  tmp$prop_black     <- tmp$ACS_PCT_BLACK          / 100
+  tmp$prop_asian     <- tmp$ACS_PCT_ASIAN_NONHISP  / 100
+  tmp$prop_other     <- (tmp$ACS_PCT_AIAN_NONHISP +
+                           tmp$ACS_PCT_NHPI_NONHISP +
+                           tmp$ACS_PCT_MULT_RACE_NONHISP) / 100
+  tmp$prop_hispanic  <- tmp$ACS_PCT_HISPANIC       / 100
   
-  # Store the processed data in an environment variable
+  # Optional quality check: ensure shares do not exceed 1
+  tmp$share_check <- tmp$prop_black + tmp$prop_asian + tmp$prop_other +
+    (1 - tmp$prop_hispanic)  # adds White_NH implicitly
+  if (any(tmp$share_check > 1.001, na.rm = TRUE)) {
+    warning(sprintf("Share constraint violated in %s (year %s)", f, year))
+  }
+  tmp$share_check <- NULL
+  
+  # 3) Store processed data frame in the workspace
   assign(paste0("df_", year), tmp)
 }
+
+
 
 # 2) Combine into a single panel dataset
 years <- sub(".*sdoh_(\\d{4}).*", "\\1", basename(files))
@@ -93,7 +88,7 @@ my_panel <- do.call(
     }
     
     required_vars <- c(
-      "COUNTYFIPS", "YEAR", "ACS_TOT_POP_WT", "race_cat", 
+      "COUNTYFIPS", "YEAR", "ACS_TOT_POP_WT","prop_black","prop_asian", "prop_other", "prop_hispanic",
       "ACS_MEDIAN_HH_INC", "ACS_PCT_UNEMPLOY", "ACS_PCT_LT_HS", 
       "ACS_PCT_AGE_18_44", "ACS_PCT_AGE_45_64", 
       "ACS_PCT_ENGL_NOT_WELL", "SAHIE_PCT_UNINSURED64", "ACS_PCT_UNINSURED"
@@ -599,6 +594,7 @@ my_data_with_spatial_g <- my_data_with_spatial_g %>%
 covariates <- c(
   "death_rates_per_100_k", "s_minus_i", "d_minus_i", 
   "ACS_MEDIAN_HH_INC", "ACS_PCT_UNEMPLOY", "ACS_PCT_LT_HS", 
+  "ACS_TOT_POP_WT","prop_black","prop_asian","prop_other","prop_hispanic",
   "population_density", "Poor.mental.health.days.raw.value", 
   "ACS_PCT_AGE_18_44", "ACS_PCT_AGE_45_64", "ACS_PCT_ENGL_NOT_WELL", 
   "percentage_uninsured"
@@ -638,15 +634,23 @@ ggpairs(df_selected,
 
 ### all years ###
 library(lfe)
-model_felm_entire_united_states<- felm(death_rates_per_100_k~ s_minus_i+ d_minus_i+ACS_MEDIAN_HH_INC+
-                                         ACS_PCT_AGE_18_44+ACS_PCT_AGE_45_64+ACS_PCT_ENGL_NOT_WELL+percentage_uninsured+
-                                          race_cat+ACS_PCT_UNEMPLOY+ACS_PCT_LT_HS+population_density+Poor.mental.health.days.raw.value
-                                     |GEOID+year,data=my_data_with_spatial_g,weights =my_data_with_spatial_g$ACS_TOT_POP_WT)
-summary(model_felm_entire_united_states,cluster = my_data_with_spatial_g[, c("state", "year")])
+model_felm_entire_us <- felm(
+  death_rates_per_100_k ~
+    s_minus_i + d_minus_i + population_density + ACS_PCT_AGE_18_44 + ACS_PCT_AGE_45_64 +
+    prop_black + prop_asian + prop_other + prop_hispanic +     
+    ACS_MEDIAN_HH_INC + 
+    ACS_PCT_ENGL_NOT_WELL + percentage_uninsured +
+    ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS +
+     Poor.mental.health.days.raw.value
+  | GEOID + year,                                               # county & year FE
+  data    = my_data_with_spatial_g,
+  weights = my_data_with_spatial_g$ACS_TOT_POP_WT
+)
 
+summary(model_felm_entire_us, cluster = ~ GEOID + year)
 
 # Extract residuals
-res <- residuals(model_felm_entire_united_states)
+res <- residuals(model_felm_entire_us)
 
 # Q–Q plot
 qqnorm(res)
@@ -654,9 +658,6 @@ qqline(res)
 
 # Histogram
 hist(res, breaks = 30, main="Residuals", xlab="")
-
-# Shapiro-Wilk test for normality
-shapiro.test(res)
 
 
 
