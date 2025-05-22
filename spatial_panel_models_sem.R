@@ -21,7 +21,7 @@ library(did)
 library(DRDID)
 library(lubridate)
 library(zoo)
-library(spml)
+library(splm)
 
 
 
@@ -34,8 +34,8 @@ my_data_with_spatial_g <- read.csv(
 )
 
 ### reading spatial weights ###
-lw_1_social <- readRDS("C:/Users/kusha/Desktop/Suide Ideation Data Request Form/suicide-ideation-social-networks/lw_1_social.rds")
-lw_2_spatial <- readRDS("C:/Users/kusha/Desktop/Suide Ideation Data Request Form/suicide-ideation-social-networks/lw_2_spatials.rds")
+lw_1_social <- readRDS("C:/Users/kusha/Desktop/Suide Ideation Data Request Form/suicide-ideation-social-networks/lw_1_entire_us.rds")
+lw_2_spatial <- readRDS("C:/Users/kusha/Desktop/Suide Ideation Data Request Form/suicide-ideation-social-networks/lw_1_entirelw_2_spatial_us.rds")
 
 
 ###running the spatial panel model ####
@@ -63,12 +63,31 @@ print(duplicates) # Should be empty
 my_data_with_spatial_g <- my_data_with_spatial_g[,-21]
 
 
+### two way fixed effect model ###
+model_felm_entire_us <- felm(
+  death_rates_per_100_k ~
+    s_minus_i + d_minus_i + population_density + ACS_PCT_AGE_18_44 + ACS_PCT_AGE_45_64 +
+    prop_black + prop_asian + prop_other + prop_hispanic +     
+    ACS_MEDIAN_HH_INC + 
+    ACS_PCT_ENGL_NOT_WELL + percentage_uninsured +
+    ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS +
+    Poor.mental.health.days.raw.value
+  | GEOID + year,                                               # county & year FE
+  data    = my_data_with_spatial_g,
+  weights = my_data_with_spatial_g$ACS_TOT_POP_WT
+)
+
+summary(model_felm_entire_us, cluster = ~ state)
 
 
 ### two way effect models with social autocorrelation##
-Linear_WITHIN_sem_ML <- spml(formula=death_rates_per_100_k~ s_minus_i+ d_minus_i+ACS_MEDIAN_HH_INC+
-                               ACS_PCT_AGE_18_44+ACS_PCT_AGE_45_64+ACS_PCT_ENGL_NOT_WELL+percentage_uninsured+
-                               race_cat+ACS_PCT_UNEMPLOY+ACS_PCT_LT_HS+population_density+Poor.mental.health.days.raw.value,
+Linear_WITHIN_sem_ML <- spml(formula= death_rates_per_100_k ~
+                               s_minus_i + d_minus_i + population_density + ACS_PCT_AGE_18_44 + ACS_PCT_AGE_45_64 +
+                               prop_black + prop_asian + prop_other + prop_hispanic +     
+                               ACS_MEDIAN_HH_INC + 
+                               ACS_PCT_ENGL_NOT_WELL + percentage_uninsured +
+                               ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS +
+                               Poor.mental.health.days.raw.value,
                              data =  my_data_with_spatial_g, 
                              index=c("GEOID", "year"),
                              listw = lw_1_social,
@@ -80,10 +99,14 @@ summary(Linear_WITHIN_sem_ML)
 
 
 ### two way fixed effects with spatial autocorrelation ####
-Linear_WITHIN_sem_ML_spatial <- spml(formula=death_rates_per_100_k~ s_minus_i+ d_minus_i+ACS_MEDIAN_HH_INC+
-                               ACS_PCT_AGE_18_44+ACS_PCT_AGE_45_64+ACS_PCT_ENGL_NOT_WELL+percentage_uninsured+
-                               race_cat+ACS_PCT_UNEMPLOY+ACS_PCT_LT_HS+population_density+Poor.mental.health.days.raw.value,
-                             data =  my_data_with_spatial_g, 
+Linear_WITHIN_sem_ML_spatial <- spml(formula= death_rates_per_100_k ~
+                                       s_minus_i + d_minus_i + population_density + ACS_PCT_AGE_18_44 + ACS_PCT_AGE_45_64 +
+                                       prop_black + prop_asian + prop_other + prop_hispanic +     
+                                       ACS_MEDIAN_HH_INC + 
+                                       ACS_PCT_ENGL_NOT_WELL + percentage_uninsured +
+                                       ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS +
+                                       Poor.mental.health.days.raw.value,
+                                     data =  my_data_with_spatial_g, 
                              index=c("GEOID", "year"),
                              listw = lw_2_spatial,
                              model="within",
@@ -92,6 +115,12 @@ Linear_WITHIN_sem_ML_spatial <- spml(formula=death_rates_per_100_k~ s_minus_i+ d
                              lag=FALSE)
 
 summary(Linear_WITHIN_sem_ML_spatial)
+
+
+
+
+
+
 
 # # Fit the Spatial Dynamic Panel Data Model on the filtered dataset
 model_sac <- SDPDm(formula = death_rates_per_100_k ~ d_minus_i+race_cat+ACS_MEDIAN_HH_INC + ACS_PCT_UNEMPLOY
