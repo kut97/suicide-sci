@@ -589,26 +589,23 @@ my_data_with_spatial_g <- my_data_with_spatial_g %>%
 
 
 ### standardized covariates #####
-
-# List of covariates to standardize
 covariates <- c(
-  "death_rates_per_100_k", "s_minus_i", "d_minus_i", 
-  "ACS_MEDIAN_HH_INC", "ACS_PCT_UNEMPLOY", "ACS_PCT_LT_HS", 
-  "ACS_TOT_POP_WT","prop_black","prop_asian","prop_other","prop_hispanic",
-  "population_density", "Poor.mental.health.days.raw.value", 
-  "ACS_PCT_AGE_18_44", "ACS_PCT_AGE_45_64", "ACS_PCT_ENGL_NOT_WELL", 
-  "percentage_uninsured"
+  "s_minus_i", "d_minus_i",
+  "population_density", "ACS_PCT_AGE_18_44", "ACS_PCT_AGE_45_64",
+  "prop_black", "prop_asian", "prop_other", "prop_hispanic",
+  "ACS_MEDIAN_HH_INC", "ACS_PCT_ENGL_NOT_WELL", "percentage_uninsured",
+  "ACS_PCT_UNEMPLOY", "ACS_PCT_LT_HS", "Poor.mental.health.days.raw.value"
 )
 
-
-# min max standardization
-# Define Min-Max scaling function
-min_max_scaled <- function(x) {
-  (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+normalised <- function(x)
+{
+  (x - mean(x)) / sd(x)
 }
 
 # Apply Min-Max scaling after Z-score standardization
-my_data_with_spatial_g[covariates] <- as.data.frame(lapply(my_data_with_spatial_g[covariates], min_max_scaled))
+my_data_with_spatial_g[covariates] <- as.data.frame(lapply(my_data_with_spatial_g[covariates], normalised))
+
+
 
 ### making the correlation plot ###
 
@@ -630,6 +627,8 @@ ggpairs(df_selected,
   theme_minimal()
 
 
+### state year fixed effects ###
+my_data_with_spatial_g$state_year <- interaction(my_data_with_spatial_g$state, my_data_with_spatial_g$year, drop = TRUE)
 
 
 ### all years ###
@@ -673,3 +672,6 @@ saveRDS(lw_2_spatial, file="lw_1_entirelw_2_spatial_us.rds")
 
 write.csv(w_i_j,'w_i_j_social_weights.csv')
 write.csv(A_ij, 'a_i_j_spatial_weights.csv')
+
+
+
