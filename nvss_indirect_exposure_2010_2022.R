@@ -1,3 +1,4 @@
+library(lfe)
 library(tidyverse)
 library(igraph)
 library(zipcodeR)
@@ -17,15 +18,23 @@ library(readxl)
 library(spdep)
 library(lmtest)
 library(sandwich)
+library(did)
+library(DRDID)
+library(lubridate)
+library(zoo)
+library(SDPDmod)
+library(readr)
+library(stargazer)
+library(modelsummary)
+library(broom)      
+library(dplyr)      
+library(ggplot2)    
+library(data.table)
 library(dplyr)
-library(tidycensus)
-library(tibble)
-library(purrr)
-library(data.table)      # fast stacking / joins
-library(fixest)          # high-dim FE + cluster
-library(ggplot2)         # plotting
-library(broom)           # tidy() for fixest
+library(viridis)
+library(fixest)
 
+# perceptually uniform colours
 
 #census_api_key("e6460566746931aed6c241abe8a6e2425aa9c699", install = TRUE)
 
@@ -764,9 +773,10 @@ rownames(gravity_matrix) <- unique_counties$GEOID
 colnames(gravity_matrix) <- unique_counties$GEOID
 
 # 4) Normalize each row to create A_{i,j}
+diag(gravity_matrix) <- 0
 row_sums <- rowSums(gravity_matrix)
 gravity_matrix <- sweep(gravity_matrix, 1, row_sums, FUN = "/")
-diag(gravity_matrix) <- 0
+
 
 
 ## --- 1.  gravity-matrix  long table ---------------------------------
@@ -898,6 +908,391 @@ did_spill_social_spatial <- felm(
 
 summary(did_spill_social_spatial)
 
+### confidence interval values for the ERPO Exposure ###
+## 1 ▸ Assemble the CI data
+ci_df <- bind_rows(
+  tidy(did_spill_social,            conf.int = TRUE) |> mutate(model = "indirect social network exposure"),
+  tidy(did_spill_social_spatial, conf.int = TRUE) |> mutate(model = "robust indirect social network exposure")
+) |>
+  filter(term == "ERPO_exposure")         # keep only the peer-exposure coefficient
+
+
+## 2 ▸ Dot-whisker plot matching the mock-up
+ggplot(ci_df,
+       aes(x = estimate,
+           y = factor(model, levels = c("indirect social network exposure", "robust indirect social network exposure")),
+           colour = model)) +
+  
+  ## zero reference
+  geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.6) +
+  
+  ## 95 % CIs with end-caps
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
+                 height = 0, linewidth = 0.9) +
+  
+  ## point estimates
+  geom_point(size = 3) +
+  
+  ## colour palette
+  scale_colour_manual(values = c("indirect social network exposure" = "red",
+                                 "robust indirect social network exposure" = "blue"),
+                      guide = "none") +
+  
+  ## axis labels
+  labs(x = "deaths per 100,000 people", y = NULL) +
+  
+  ## styling
+  theme_classic(base_size = 12) +
+  theme(
+    panel.grid.major.y = element_line(colour = "grey85"),
+    axis.ticks.y      = element_blank()
+  )
+
+
+
+### ENTIRE contiguous US map ###
+# -----------------------------------------------------------
+# 1 ▸ Compute the change in standardised ERPO exposure
+# -----------------------------------------------------------
+my_data_with_spatial_map <- my_data_with_spatial_g |>
+  mutate(
+    ERPO_exposure = if_else(GEOID == "31041" & is.na(ERPO_exposure),
+                            0,            # imputed value
+                            ERPO_exposure)
+  )
+
+delta_df <- dcast(
+  setDT(my_data_with_spatial_map)[year %in% c(2010, 2022)],
+  GEOID ~ paste0("y", year),
+  value.var      = "ERPO_exposure",
+  fun.aggregate  = mean,     # resolves duplicates
+  na.rm          = TRUE
+)[ , delta := y2022 - y2010 ]
+
+# -----------------------------------------------------------
+# 2 ▸ Keep only the 48 contiguous states + DC
+# -----------------------------------------------------------
+contig_fips <- sprintf("%02d", 1:56) |>
+  setdiff(c("02","15","60","66","69","72","78"))   # drop AK, HI, territories
+
+us_map <- my_data_with_spatial_map|>
+  filter(year == 2022, state_fips %in% contig_fips) |>
+  select(GEOID, geometry) |>
+  left_join(delta_df, by = "GEOID") |>
+  st_as_sf() |>
+  st_transform(5070)        # Conterminous USA Albers Equal-Area
+us_map$GEOID <- as.character(us_map$GEOID)
+
+# -------------------------------
+# 1 ▸ Reference geometry (48 + DC)
+# -------------------------------
+contig_fips <- sprintf("%02d", setdiff(1:56, c(2,15,60,66,69,72,78)))
+
+ref <- counties(cb = TRUE, year = 2022) %>%          # cb = cartographic boundary
+  filter(STATEFP %in% contig_fips) %>%               # drop AK, HI, territories
+  st_transform(5070) %>%                             # same CRS as your map
+  select(GEOID)                                      # keep only the key
+
+# --------------------------------
+# 2 ▸ Missing GEOIDs in your layer
+# --------------------------------
+missing <- anti_join(ref %>% st_drop_geometry(),      # reference keys
+                     us_map %>% st_drop_geometry(),   # keys in your map
+                     by = "GEOID")
+
+print(missing)
+#> returns a data frame; empty → all counties present
+#> non-empty → GEOIDs of absent counties
+
+# ------------------------------------------
+# 3 ▸ If `missing` non-empty: bring them in
+# ------------------------------------------
+if (nrow(missing) > 0) {
+  us_map <- bind_rows(
+    us_map,
+    ref %>%                    # geometry from reference
+      filter(GEOID %in% missing$GEOID) %>% 
+      mutate(                  # attach data needed for plotting
+        y2010 = NA_real_,
+        y2022 = NA_real_,
+        delta = 0              # or other imputation rule
+      )
+  )
+}
+
+# ------------------------------------------
+# 4 ▸ If `missing` empty but hole persists
+#    → geometry invalid → repair:
+# ------------------------------------------
+us_map <- st_make_valid(us_map)
+
+# Re-plot
+ggplot(us_map) +
+  geom_sf(aes(fill = delta), linewidth = .05, colour = NA) +
+  scale_fill_viridis_c(option = "plasma",
+                       name = "Δ ERPO\nsocial exposure",
+                       na.value = "grey90") +
+  coord_sf(crs = 5070, datum = NA) +
+  theme_void(base_size = 12)
+### saving the plot ###
+
+p <- ggplot(us_map) +
+  geom_sf(aes(fill = delta), linewidth = .05, colour = NA) +
+  scale_fill_viridis_c(
+    option = "plasma",
+    name   =  "Δ ERPO\nsocial exposure" # line-1 | line-2
+  ) +
+  coord_sf(crs = 5070, datum = NA) +
+  theme_void(base_size = 12)
+p
+
+# embed a font that has Δ
+
+ggsave("Figure 2.pdf",
+       plot   = p,
+       device = cairo_pdf,   # <- vector PDF, embeds all glyphs
+       width  = 6, height = 3.5, units = "in")
+
+### STARGAZER PLOTS ###
+stargazer(
+  did_no_spill, 
+  did_spill_social, 
+  did_spill_social_spatial,
+  type = "latex",
+  title = "Effect of Policy Exposure on Death Rates",
+  column.labels = c("Direct Effect", "Indirect Social Network Exposure", "Robust Indirect Social Network Exposure"),
+  dep.var.labels = "Deaths per 100K",
+  covariate.labels = c(
+    "ERPO",                       # from did_no_spill
+    "ERPO Social Exposure", # ERPO_exposure in did_spill_social
+    "ERPO Spatial Exposure",
+    "Population Density",
+    "Percentage Age 18-44", 
+    "Percentage Age 45-64",
+    "Proportion Black",
+    "Proportion Asian",
+    "Proportion Other",
+    "Proportion Hispanic",
+    "Median Household Income",
+    "Percentage Population who do not speak English that well",
+    "Percentage Population who are unemployed",
+    "Percentage Population with Less Than High School Education"
+  )
+  ,
+  keep.stat = c("n", "rsq", "adj.rsq", "f"),
+  no.space = TRUE,
+  omit.stat = "ser",
+  omit.table.layout = "n",
+  column.sep.width = "1pt",
+  out = "output_table.tex"  # Save the output directly to a .tex file
+)
+
+### social proximity and spatial proximity ####
+### deaths social proximity ####
+# Subset and rename columns
+#Preparing `social_df` with necessary columns
+social_df <- suicide_mortality[, c("GEOID", "ACS_TOT_POP_WT", "death_rates_per_100_k")]
+colnames(social_df)[1] <- "fr_loc"
+colnames(social_df)[3] <- "deaths_per_capita"
+social_df <- social_df[order(social_df$fr_loc), ]
+
+# Reading and processing the TSV file
+df_0 <- read_tsv("C:/Users/kusha/Desktop/opioid-sci/Data for Paper/SCI/county_county.tsv")
+df_1 <- df_0 %>%
+  filter(user_loc %in% social_df$fr_loc & fr_loc %in% social_df$fr_loc) %>%
+  filter(!duplicated(paste0(pmax(user_loc, fr_loc), pmin(user_loc, fr_loc))))
+
+# Preparing data for adjacency matrix
+df_for_matrix_weights <- df_1 %>% select(user_loc, fr_loc, scaled_sci)
+nodes <- social_df %>% select(fr_loc) %>% distinct()
+
+# Create adjacency matrix
+k <- graph.data.frame(df_for_matrix_weights, directed = FALSE, vertices = nodes)
+
+# Adjusting weights by population
+population <- suicide_mortality %>%
+  group_by(FIPS) %>%
+  summarise(population = round(mean(ACS_TOT_POP_WT, na.rm = TRUE))) %>%
+  filter(FIPS %in% nodes$fr_loc) %>%
+  arrange(match(FIPS, nodes$fr_loc))  # Ensure order matches the adjacency matrix
+
+pop_vector <- population$population
+
+
+### social and spatial proximity ###
+
+## --- 1A  social-network weights  w_ij  ---------------------------------
+## Inputs:  scaled_sci (SCI_ij), pop_vector (n_j), nodes$GEOID
+
+# 1.1  adjacency matrix of SCI_ij   (symmetric, zero diagonal)
+W   <- as_adjacency_matrix(k, attr = "scaled_sci", sparse = TRUE)
+diag(W) <- 0
+
+# 1.2  multiply each column j by population n_j
+W   <- sweep(W, 2, pop_vector, `*`)
+
+# 1.3  row-normalise   ⇒   Σ_{j≠i} w_ij = 1
+W   <- sweep(W, 1, rowSums(W), `/`)
+W[is.na(W)] <- 0                        
+
+
+## --- 1B  spatial-proximity weights  a_ij  ------------------------------
+## Inputs:  distance_km matrix (same ordering as nodes$GEOID)
+
+A   <- InvDistMat(distance_km)        # element = 1/d_ij  (diag = ∞ handled)
+diag(A) <- 0
+A  <- sweep(A, 1, rowSums(A), '/')   # row-normalise
+
+# convert to data.table for speed
+setDT(my_data_with_spatial_g)
+setkey(my_data_with_spatial_g, GEOID)
+
+# result containers
+my_data_with_spatial_g[, `:=` (s_minus_i = NA_real_,
+                               d_minus_i = NA_real_)]
+
+years <- sort(unique(my_data_with_spatial_g$year))
+
+
+### calculation step ###
+for (yr in years) {
+  
+  idx <- match(my_data_with_spatial_g[year == yr, GEOID], nodes$fr_loc)
+  
+  ## y_t is the vector of OOD rates for year t in matrix order
+  y_t <- my_data_with_spatial_g[year == yr][order(idx), death_rates_per_100_k]
+  
+  ## social spill-over
+  svec <- W[idx, , drop = FALSE] %*% y_t
+  
+  ## spatial spill-over
+  dvec <- A[idx, , drop = FALSE] %*% y_t
+  
+  ## write back
+  my_data_with_spatial_g[year == yr, `:=` (s_minus_i = as.numeric(svec),
+                                           d_minus_i = as.numeric(dvec))]
+}
+
+my_data_with_spatial_g[,  s_minus_i_z := as.numeric(scale(s_minus_i))]
+my_data_with_spatial_g[,  d_minus_i_z := as.numeric(scale(d_minus_i))]
+
+## two-way fixed effect for  social and spatial proximity ###
+proximity <- felm(
+  death_rates_per_100_k ~ s_minus_i_z +
+    population_density + ACS_PCT_AGE_18_44 + ACS_PCT_AGE_45_64 +
+    prop_black + prop_asian + prop_other + prop_hispanic +     
+    ACS_MEDIAN_HH_INC + 
+    ACS_PCT_ENGL_NOT_WELL + 
+    ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS 
+  | GEOID + year | 0 | state, 
+  data = my_data_with_spatial_g,
+  weights = my_data_with_spatial_g$ACS_TOT_POP_WT
+)
+
+summary(proximity)
+
+socio_spatial_proximity <-  felm(
+  death_rates_per_100_k ~ s_minus_i_z + d_minus_i_z+
+    population_density + ACS_PCT_AGE_18_44 + ACS_PCT_AGE_45_64 +
+    prop_black + prop_asian + prop_other + prop_hispanic +     
+    ACS_MEDIAN_HH_INC + 
+    ACS_PCT_ENGL_NOT_WELL + 
+    ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS 
+  | GEOID + year | 0 | state, 
+  data = my_data_with_spatial_g,
+  weights = my_data_with_spatial_g$ACS_TOT_POP_WT
+)
+
+summary(socio_spatial_proximity)
+### proximity plots ####
+
+## 1 ▸ Extract 95% CIs for the two peer-exposure terms
+## 1 ▸ Assemble the CI data
+ci_df <- bind_rows(
+  tidy(proximity,            conf.int = TRUE) |> mutate(model = "social"),
+  tidy(socio_spatial_proximity, conf.int = TRUE) |> mutate(model = "socio-spatial")
+) |>
+  filter(term == "s_minus_i_z")         # keep only the peer-exposure coefficient
+
+
+## 2 ▸ Dot-whisker plot matching the mock-up
+ggplot(ci_df,
+       aes(x = estimate,
+           y = factor(model, levels = c("socio-spatial", "social")),
+           colour = model)) +
+  
+  ## zero reference
+  geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.6) +
+  
+  ## 95 % CIs with end-caps
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
+                 height = 0, linewidth = 0.9) +
+  
+  ## point estimates
+  geom_point(size = 3) +
+  
+  ## colour palette
+  scale_colour_manual(values = c("social" = "red",
+                                 "socio-spatial" = "blue"),
+                      guide = "none") +
+  
+  ## axis labels
+  labs(x = "deaths per 100,000 people", y = NULL) +
+  
+  ## styling
+  theme_classic(base_size = 12) +
+  theme(
+    panel.grid.major.y = element_line(colour = "grey85"),
+    axis.ticks.y      = element_blank()
+  )
+
+
+
+### creating the table for reression results relating to proximity ###
+
+stargazer(
+  proximity,
+  socio_spatial_proximity,
+  type = "latex",
+  title = paste0(
+    "Socio-spatial diffusion effects on county-level mortality rates (deaths per 100\\,000). ",
+    "Coefficient estimates are from two population-weighted least-squares models with county ($i$) ",
+    "and year ($t$) fixed effects. Column~(1) isolates \\emph{social diffusion} by regressing death ",
+    "rates on standardized deaths in socially connected counties ($s_{-it}^{z}$). Column~(2) adds ",
+    "standardized deaths in geographically adjacent counties ($d_{-it}^{z}$) to disentangle social ",
+    "from spatial propagation. Both specifications control for population density, age composition, ",
+    "racial/ethnic composition, median household income, limited-English proficiency, unemployment, ",
+    "and educational attainment. Standard errors are clustered by state to accommodate arbitrary ",
+    "spatial and temporal autocorrelation. The social-exposure coefficient remains large and significant ",
+    "(\\textasciitilde3.0 additional deaths per 100\\,000) after adjusting for spatial proximity; the ",
+    "spatial-exposure coefficient is positive and significant (\\textasciitilde0.9). Model fit is high ",
+    "in both cases ($R^{2}_{\\text{within}} \\approx 0.946$). Significance levels: *$p<0.05$; ",
+    "**$p<0.01$; ***$p<0.001$." ),
+  column.labels = c("Social Proximity Only", "Socio-Spatial Proximity"),
+  dep.var.labels = "Deaths per 100K",
+  covariate.labels = c(
+    "Deaths in Social Proximity",
+    "Deaths in Spatial Proximity",
+    "Population Density",
+    "Percentage Age 18-44", 
+    "Percentage Age 45-64",
+    "Proportion Black",
+    "Proportion Asian",
+    "Proportion Other",
+    "Proportion Hispanic",
+    "Median Household Income",
+    "Percentage Population who do not speak English that well",
+    "Percentage Population who are unemployed",
+    "Percentage Population with Less Than High School Education"
+  ),
+  keep.stat = c("n", "rsq", "adj.rsq", "f"),
+  no.space = TRUE,
+  omit.stat = "ser",
+  omit.table.layout = "n",
+  column.sep.width = "1pt",
+  out = "output_table.tex"
+)
+### event study code ####
 ### event plot design ###
 # ------------------------------------------------------------
 # 1.  Inputs
@@ -912,7 +1307,7 @@ events        <- as.data.table(policy_data)[start_year > 0,
                                               t0          = start_year)]
 
 K_pre  <- 4   # 2010 → 2014 gap
-K_post <- 3 # 2019 → 2020 gap
+K_post <- 2 # 2019 → 2020 gap
 
 # ------------------------------------------------------------
 # 2.  Build stacked event–study data
@@ -1022,7 +1417,7 @@ mw.attgt <- att_gt(yname = "death_rates_per_100_k",
                      ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS,
                    data = my_data_with_spatial_g,
                    weightsname    = "ACS_TOT_POP_WT",
-                   control_group = "notyettreated",
+                   control_group = "nevertreated",
                    est_method = "reg",
                    clustervars   = "state"
 )
@@ -1034,8 +1429,8 @@ summary(mw.attgt)
 mw.dyn.balance <- aggte(
   mw.attgt,
   type   = "dynamic",
-  min_e  = -3,    # three leads (years before treatment)
-  max_e  =  3,    # four lags (years after treatment)
+  min_e  = -4,    # three leads (years before treatment)
+  max_e  =  2,    # four lags (years after treatment)
   na.rm  = TRUE
 )
 
@@ -1044,58 +1439,4 @@ summary(mw.dyn.balance)
 
 ggdid(mw.dyn.balance)
 
-### confidence interval values for the ERPO Exposure ###
-#–– 1. Extract point-estimates and 95 % CIs ––––––––––––––––––––
-ci_95 <- function(model, label){
-  tidy(model, conf.int = TRUE) %>% 
-    filter(term == "ERPO_exposure") %>% 
-    mutate(model = label) %>% 
-    select(model, estimate, conf.low, conf.high)
-}
 
-df_ci <- bind_rows(
-  ci_95(did_spill_social,         "Social spillover"),
-  ci_95(did_spill_social_spatial, "Social + spatial")
-)
-
-#–– 2. Dot-and-whisker plot with manual colours ––––––––––––––––
-ggplot(df_ci, aes(x = estimate, y = model, colour = model)) +
-  geom_vline(xintercept = 0, linetype = "dashed") +
-  geom_pointrange(aes(xmin = conf.low, xmax = conf.high), fatten = 2) +
-  scale_colour_manual(values = c("Social spillover" = "red",
-                                 "Social + spatial" = "blue")) +
-  labs(x = expression(hat(beta)~"(95%~CI)"), y = NULL, colour = NULL) +
-  theme_classic(base_size = 12)
-### STARGAZER PLOTS ###
-stargazer(
-  did_no_spill, 
-  did_spill_social, 
-  did_spill_social_spatial,
-  type = "latex",
-  title = "Effect of Policy Exposure on Death Rates",
-  column.labels = c("Direct Effect", "Indirect Social Network Exposure", "Robust Indirect Social Network Exposure"),
-  dep.var.labels = "Deaths per 100K",
-  covariate.labels = c(
-    "ERPO",                       # from did_no_spill
-    "ERPO Social Exposure", # ERPO_exposure in did_spill_social
-    "ERPO Spatial Exposure",
-    "Population Density",
-    "Percentage Age 18-44", 
-    "Percentage Age 45-64",
-    "Proportion Black",
-    "Proportion Asian",
-    "Proportion Other",
-    "Proportion Hispanic",
-    "Median Household Income",
-    "Percentage Population who do not speak English that well",
-    "Percentage Population who are unemployed",
-    "Percentage Population with Less Than High School Education"
-  )
-  ,
-  keep.stat = c("n", "rsq", "adj.rsq", "f"),
-  no.space = TRUE,
-  omit.stat = "ser",
-  omit.table.layout = "n",
-  column.sep.width = "1pt",
-  out = "output_table.tex"  # Save the output directly to a .tex file
-)
