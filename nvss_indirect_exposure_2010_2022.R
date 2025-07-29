@@ -411,6 +411,10 @@ for (f in files) {
                            tmp$ACS_PCT_MULT_RACE_NONHISP) / 100
   tmp$prop_hispanic  <- tmp$ACS_PCT_HISPANIC       / 100
   
+  # ---- NEW: age composition ----
+  u18_vars <- c("ACS_PCT_AGE_0_4","ACS_PCT_AGE_5_9","ACS_PCT_AGE_10_14","ACS_PCT_AGE_15_17")
+  # Require all four components; if any missing, result is NA (na.rm = FALSE)
+  tmp$ACS_PCT_AGE_U18    <- rowSums(tmp[, u18_vars, drop = FALSE], na.rm = FALSE)
   # Optional quality check: ensure shares do not exceed 1
   tmp$share_check <- tmp$prop_black + tmp$prop_asian + tmp$prop_other +
     (1 - tmp$prop_hispanic)  # adds White_NH implicitly
@@ -441,8 +445,8 @@ my_panel <- do.call(
     required_vars <- c(
       "COUNTYFIPS", "YEAR", "ACS_TOT_POP_WT","prop_black","prop_asian", "prop_other", "prop_hispanic",
       "ACS_MEDIAN_HH_INC", "ACS_PCT_UNEMPLOY", "ACS_PCT_LT_HS", 
-      "ACS_PCT_AGE_18_44", "ACS_PCT_AGE_45_64", 
-      "ACS_PCT_ENGL_NOT_WELL"
+      "ACS_PCT_AGE_18_44", "ACS_PCT_AGE_45_64", "ACS_PCT_AGE_U18", 
+      "ACS_PCT_AGE_ABOVE65", "ACS_PCT_ENGL_NOT_WELL"
     )
     
     vars_present <- intersect(required_vars, names(d))
@@ -471,7 +475,6 @@ suicide_mortality <- complete_suicide_panel_ref %>%
     by = c( "GEOID"="COUNTYFIPS" , "year"= "YEAR")
   )
 # Variable mapping (example; adjust if you have different definitions)
-# 1. Specify every ACS table code you need
 get_sdoh_acs <- function(year){
   
   core <- c(
@@ -491,16 +494,29 @@ get_sdoh_acs <- function(year){
     hh_total  = "C16002_001"
   )
   
-  age18_44 <- c("B01001_007","B01001_008","B01001_009","B01001_010","B01001_011",
-                "B01001_031","B01001_032","B01001_033","B01001_034","B01001_035")
+  # ---- Correct age bucket indices from B01001 (male 3:25, female 27:49) ----
+  # <18  : male 3:6,    female 27:30
+  u18_codes      <- c(sprintf("B01001_%03d",  3: 6),
+                      sprintf("B01001_%03d", 27:30))
   
-  age45_64 <- c("B01001_012","B01001_013","B01001_014","B01001_015","B01001_016",
-                "B01001_036","B01001_037","B01001_038","B01001_039","B01001_040")
+  # 18–44: male 7:14,   female 31:38
+  age18_44_codes <- c(sprintf("B01001_%03d",  7:14),
+                      sprintf("B01001_%03d", 31:38))
+  
+  # 45–64: male 15:19,  female 39:43
+  age45_64_codes <- c(sprintf("B01001_%03d", 15:19),
+                      sprintf("B01001_%03d", 39:43))
+  
+  # 65+  : male 20:25,  female 44:49
+  age65p_codes   <- c(sprintf("B01001_%03d", 20:25),
+                      sprintf("B01001_%03d", 44:49))
   
   vars <- c(
     core,
-    stats::setNames(age18_44, age18_44),    # name each age code by itself
-    stats::setNames(age45_64, age45_64)
+    stats::setNames(u18_codes,      u18_codes),
+    stats::setNames(age18_44_codes, age18_44_codes),
+    stats::setNames(age45_64_codes, age45_64_codes),
+    stats::setNames(age65p_codes,   age65p_codes)
   )
   
   acs <- get_acs(
@@ -512,14 +528,16 @@ get_sdoh_acs <- function(year){
     cache_table = TRUE
   )
   
-  # Strip trailing "E" only from estimate columns
-  acs <- acs %>% rename_with(~ sub("E$", "", .x), ends_with("E"))
+  # Keep estimates; strip trailing “E” from estimate cols only
+  acs <- acs %>% dplyr::rename_with(~ sub("E$", "", .x), dplyr::ends_with("E"))
   
-  # Sum age buckets safely
-  a18_44 <- acs %>% select(all_of(age18_44)) %>% as.matrix() %>% rowSums(na.rm = TRUE)
-  a45_64 <- acs %>% select(all_of(age45_64)) %>% as.matrix() %>% rowSums(na.rm = TRUE)
+  # Safe row sums
+  u18    <- acs %>% dplyr::select(dplyr::all_of(u18_codes))       %>% as.matrix() %>% rowSums(na.rm = TRUE)
+  a18_44 <- acs %>% dplyr::select(dplyr::all_of(age18_44_codes))  %>% as.matrix() %>% rowSums(na.rm = TRUE)
+  a45_64 <- acs %>% dplyr::select(dplyr::all_of(age45_64_codes))  %>% as.matrix() %>% rowSums(na.rm = TRUE)
+  a65p   <- acs %>% dplyr::select(dplyr::all_of(age65p_codes))    %>% as.matrix() %>% rowSums(na.rm = TRUE)
   
-  acs %>% transmute(
+  acs %>% dplyr::transmute(
     COUNTYFIPS            = GEOID,
     YEAR                  = year,
     ACS_TOT_POP_WT        = total_pop,
@@ -528,10 +546,13 @@ get_sdoh_acs <- function(year){
     prop_other            = (aian + nhpi + multi) / total_pop,
     prop_hispanic         = hisp       / total_pop,
     ACS_MEDIAN_HH_INC     = med_inc,
-    ACS_PCT_UNEMPLOY      = 100 * unem / labor,
-    ACS_PCT_LT_HS         = 100 * lt_hs / tot_edu,
+    ACS_PCT_UNEMPLOY      = 100 * unem   / labor,
+    ACS_PCT_LT_HS         = 100 * lt_hs  / tot_edu,
+    # Age composition (percent of total population)
+    ACS_PCT_AGE_U18       = 100 * u18    / total_pop,
     ACS_PCT_AGE_18_44     = 100 * a18_44 / total_pop,
     ACS_PCT_AGE_45_64     = 100 * a45_64 / total_pop,
+    ACS_PCT_AGE_ABOVE65  = 100 * a65p   / total_pop,
     ACS_PCT_ENGL_NOT_WELL = 100 * eng_ltwell / hh_total
   )
 }
@@ -545,7 +566,7 @@ acs22   <- get_sdoh_acs(2022)
 # ------------------------------------------------------------------
 acs_vars <- c("ACS_TOT_POP_WT","prop_black","prop_asian","prop_other",
               "prop_hispanic","ACS_MEDIAN_HH_INC","ACS_PCT_UNEMPLOY",
-              "ACS_PCT_LT_HS","ACS_PCT_AGE_18_44","ACS_PCT_AGE_45_64",
+              "ACS_PCT_LT_HS","ACS_PCT_AGE_18_44","ACS_PCT_AGE_45_64","ACS_PCT_AGE_U18", "ACS_PCT_AGE_ABOVE65",
               "ACS_PCT_ENGL_NOT_WELL")
 
 # ------------------------------------------------------------------
@@ -560,15 +581,13 @@ acs22_trim <- acs22 %>%
   rename(GEOID = COUNTYFIPS, year = YEAR) %>% 
   semi_join(suicide_mortality, by = c("GEOID","year"))
 
-
-
 acs_vars <- c("ACS_TOT_POP_WT","prop_black","prop_asian","prop_other",
               "prop_hispanic","ACS_MEDIAN_HH_INC","ACS_PCT_UNEMPLOY",
-              "ACS_PCT_LT_HS","ACS_PCT_AGE_18_44","ACS_PCT_AGE_45_64",
+              "ACS_PCT_LT_HS","ACS_PCT_AGE_18_44","ACS_PCT_AGE_45_64","ACS_PCT_AGE_U18", "ACS_PCT_AGE_ABOVE65",
               "ACS_PCT_ENGL_NOT_WELL")
-
 # 1. Pool 2021-2022 ACS data and align keys -------------------------------
 acs_new <- bind_rows(acs21_trim, acs22_trim)      # already GEOID-year keyed
+
 
 # 2. Inject 2021-22 covariates where available ----------------------------
 sm_step1 <- suicide_mortality |>
@@ -830,7 +849,7 @@ my_data_with_spatial_g$state_year <- interaction(my_data_with_spatial_g$state, m
 ## experimenting with network exposure ####
 
 covariates <- c("ERPO_exposure","InvDist_exposure",
-  "population_density", "ACS_PCT_AGE_18_44", "ACS_PCT_AGE_45_64",
+  "population_density","ACS_PCT_AGE_U18", "ACS_PCT_AGE_18_44", "ACS_PCT_AGE_45_64", "ACS_PCT_AGE_ABOVE65",
   "prop_black", "prop_asian", "prop_other", "prop_hispanic",
   "ACS_MEDIAN_HH_INC", "ACS_PCT_ENGL_NOT_WELL",
   "ACS_PCT_UNEMPLOY", "ACS_PCT_LT_HS"
@@ -849,7 +868,8 @@ my_data_with_spatial_g[covariates] <- as.data.frame(lapply(my_data_with_spatial_
 
 ## no spill over ####
 did_no_spill <- felm(
-  death_rates_per_100_k ~ D_it+ population_density + ACS_PCT_AGE_18_44 + ACS_PCT_AGE_45_64 +
+  death_rates_per_100_k ~ D_it+ population_density +ACS_PCT_AGE_U18+ ACS_PCT_AGE_18_44 
+  + ACS_PCT_AGE_45_64 +ACS_PCT_AGE_ABOVE65+
     prop_black + prop_asian + prop_other + prop_hispanic +     
     ACS_MEDIAN_HH_INC + 
     ACS_PCT_ENGL_NOT_WELL + 
@@ -866,7 +886,8 @@ summary(did_no_spill)
 
 did_spill_spatial <- felm(
   death_rates_per_100_k ~ InvDist_exposure+
-    population_density + ACS_PCT_AGE_18_44 + ACS_PCT_AGE_45_64 +
+    population_density +ACS_PCT_AGE_U18+ ACS_PCT_AGE_18_44 
+  + ACS_PCT_AGE_45_64 +ACS_PCT_AGE_ABOVE65+
     prop_black + prop_asian + prop_other + prop_hispanic +     
     ACS_MEDIAN_HH_INC + 
     ACS_PCT_ENGL_NOT_WELL + 
@@ -881,10 +902,11 @@ summary(did_spill_spatial)
 ### social spillover ###
 did_spill_social <- felm(
   death_rates_per_100_k ~  ERPO_exposure +
-    population_density + ACS_PCT_AGE_18_44 + ACS_PCT_AGE_45_64 +
+    population_density +ACS_PCT_AGE_U18+ ACS_PCT_AGE_18_44 
+  + ACS_PCT_AGE_45_64 +ACS_PCT_AGE_ABOVE65+
     prop_black + prop_asian + prop_other + prop_hispanic +     
     ACS_MEDIAN_HH_INC + 
-    ACS_PCT_ENGL_NOT_WELL +
+    ACS_PCT_ENGL_NOT_WELL + 
     ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS 
   | GEOID + state_year | 0 | state, 
   data = my_data_with_spatial_g,
@@ -896,10 +918,11 @@ summary(did_spill_social)
 
 ### spatial and social spillover ####
 did_spill_social_spatial <- felm(
-  death_rates_per_100_k ~ ERPO_exposure +  InvDist_exposure +  population_density + ACS_PCT_AGE_18_44 + ACS_PCT_AGE_45_64 +
+  death_rates_per_100_k ~ ERPO_exposure +  InvDist_exposure + population_density +ACS_PCT_AGE_U18+ ACS_PCT_AGE_18_44 
+  + ACS_PCT_AGE_45_64 +ACS_PCT_AGE_ABOVE65+
     prop_black + prop_asian + prop_other + prop_hispanic +     
     ACS_MEDIAN_HH_INC + 
-    ACS_PCT_ENGL_NOT_WELL +
+    ACS_PCT_ENGL_NOT_WELL + 
     ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS 
   | GEOID + state_year | 0 |state ,
   data = my_data_with_spatial_g,
@@ -939,7 +962,7 @@ ggplot(ci_df,
                       guide = "none") +
   
   ## axis labels
-  labs(x = "deaths per 100,000 people", y = NULL) +
+  labs(x = "Change in focal-county suicide mortality (per 100,000)\nfor a 1-SD increase in ERPO social exposure", y = NULL) +
   
   ## styling
   theme_classic(base_size = 12) +
@@ -1067,16 +1090,18 @@ stargazer(
     "ERPO Social Exposure", # ERPO_exposure in did_spill_social
     "ERPO Spatial Exposure",
     "Population Density",
-    "Percentage Age 18-44", 
-    "Percentage Age 45-64",
-    "Proportion Black",
-    "Proportion Asian",
-    "Proportion Other",
-    "Proportion Hispanic",
+    "Percent aged below 18",
+    "Percent aged 18-44", 
+    "Percent aged 45-64",
+    "Precent aged above 65",
+    "Percent Black",
+    "Percent Asian",
+    "Percent Other",
+    "Percent Hispanic",
     "Median Household Income",
-    "Percentage Population who do not speak English that well",
-    "Percentage Population who are unemployed",
-    "Percentage Population with Less Than High School Education"
+    "Percent of population who do not speak English that well",
+    "Percent unemployed ",
+    "Percent with less than high school education"
   )
   ,
   keep.stat = c("n", "rsq", "adj.rsq", "f"),
@@ -1108,6 +1133,10 @@ nodes <- social_df %>% select(fr_loc) %>% distinct()
 
 # Create adjacency matrix
 k <- graph.data.frame(df_for_matrix_weights, directed = FALSE, vertices = nodes)
+
+## RENAMING THE COLUMN
+
+colnames(suicide_mortality)[1] <- "FIPS"
 
 # Adjusting weights by population
 population <- suicide_mortality %>%
@@ -1179,7 +1208,8 @@ my_data_with_spatial_g[,  d_minus_i_z := as.numeric(scale(d_minus_i))]
 ## two-way fixed effect for  social and spatial proximity ###
 proximity <- felm(
   death_rates_per_100_k ~ s_minus_i_z +
-    population_density + ACS_PCT_AGE_18_44 + ACS_PCT_AGE_45_64 +
+    population_density +ACS_PCT_AGE_U18+ ACS_PCT_AGE_18_44 
+  + ACS_PCT_AGE_45_64 +ACS_PCT_AGE_ABOVE65+
     prop_black + prop_asian + prop_other + prop_hispanic +     
     ACS_MEDIAN_HH_INC + 
     ACS_PCT_ENGL_NOT_WELL + 
@@ -1193,7 +1223,8 @@ summary(proximity)
 
 socio_spatial_proximity <-  felm(
   death_rates_per_100_k ~ s_minus_i_z + d_minus_i_z+
-    population_density + ACS_PCT_AGE_18_44 + ACS_PCT_AGE_45_64 +
+    population_density +ACS_PCT_AGE_U18+ ACS_PCT_AGE_18_44 
+  + ACS_PCT_AGE_45_64 +ACS_PCT_AGE_ABOVE65+
     prop_black + prop_asian + prop_other + prop_hispanic +     
     ACS_MEDIAN_HH_INC + 
     ACS_PCT_ENGL_NOT_WELL + 
@@ -1220,33 +1251,28 @@ ggplot(ci_df,
        aes(x = estimate,
            y = factor(model, levels = c("socio-spatial", "social")),
            colour = model)) +
-  
-  ## zero reference
   geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.6) +
-  
-  ## 95 % CIs with end-caps
   geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
                  height = 0, linewidth = 0.9) +
-  
-  ## point estimates
   geom_point(size = 3) +
-  
-  ## colour palette
   scale_colour_manual(values = c("social" = "red",
                                  "socio-spatial" = "blue"),
                       guide = "none") +
-  
+  ## y-axis tick labels -> 'With' (socio-spatial) and 'Without' (social)
+  scale_y_discrete(labels = c("socio-spatial" = "Model 2",
+                              "social"         = "Model 1")) +
   ## axis labels
-  labs(x = "deaths per 100,000 people", y = NULL) +
-  
-  ## styling
+  labs(
+    x = "Change in focal-county suicide mortality (per 100,000)\nfor a 1-SD increase in socially proximal counties suicide rate",
+    y = NULL
+  ) +
+  ## larger fonts (x-ticks and x-label)
   theme_classic(base_size = 12) +
   theme(
-    panel.grid.major.y = element_line(colour = "grey85"),
-    axis.ticks.y      = element_blank()
+    axis.text.x  = element_text(size = 13),
+    axis.title.x = element_text(size = 13),
+    axis.text.y  = element_text(size = 13)
   )
-
-
 
 ### creating the table for reression results relating to proximity ###
 
@@ -1271,19 +1297,21 @@ stargazer(
   column.labels = c("Social Proximity Only", "Socio-Spatial Proximity"),
   dep.var.labels = "Deaths per 100K",
   covariate.labels = c(
-    "Deaths in Social Proximity",
-    "Deaths in Spatial Proximity",
+    "s_{-it}",
+    "d_{-it}",
     "Population Density",
-    "Percentage Age 18-44", 
-    "Percentage Age 45-64",
-    "Proportion Black",
-    "Proportion Asian",
-    "Proportion Other",
-    "Proportion Hispanic",
+    "Percent aged below 18",
+    "Percent aged 18-44", 
+    "Percent aged 45-64",
+    "Precent aged above 65",
+    "Percent Black",
+    "Percent Asian",
+    "Percent Other",
+    "Percent Hispanic",
     "Median Household Income",
-    "Percentage Population who do not speak English that well",
-    "Percentage Population who are unemployed",
-    "Percentage Population with Less Than High School Education"
+    "Percent of population who do not speak English that well",
+    "Percent unemployed ",
+    "Percent with less than high school education"
   ),
   keep.stat = c("n", "rsq", "adj.rsq", "f"),
   no.space = TRUE,
@@ -1293,150 +1321,155 @@ stargazer(
   out = "output_table.tex"
 )
 ### event study code ####
-### event plot design ###
-# ------------------------------------------------------------
-# 1.  Inputs
-# ------------------------------------------------------------
-panel         <- as.data.table(my_data_with_spatial_g)   # county–year panel
-wstate        <- as.data.table(w_i_state)                # i_fips, j_state, w_is
-setnames(wstate, c("i_fips","j_state","w_is"),
-         c("GEOID" , "event_state","exposure"))
+  # 1) Inputs (from your workspace)
+  # =========================
+# my_data_with_spatial_g : county-year panel (data.frame/data.table)
+# w_i_state              : long weights: i_fips, j_state, w_is
+# policy_data            : state-level events: state, start_year (>0 = treated)
 
-events        <- as.data.table(policy_data)[start_year > 0,
-                                            .(event_state = state,
-                                              t0          = start_year)]
+# Convert to data.table
+panel  <- as.data.table(my_data_with_spatial_g)
+wstate <- as.data.table(w_i_state)
 
-K_pre  <- 4   # 2010 → 2014 gap
-K_post <- 2 # 2019 → 2020 gap
+# Standardize column names for the weights
+setnames(wstate, c("i_fips","j_state","w_is"), c("GEOID","event_state","exposure"))
 
-# ------------------------------------------------------------
-# 2.  Build stacked event–study data
-# ------------------------------------------------------------
-stacked_es <- rbindlist(lapply(1:nrow(events), function(j){
+# Event list (only treated states with valid adoption years)
+events <- as.data.table(policy_data)[start_year > 0,
+                                     .(event_state = state, t0 = start_year)]
+
+# =========================
+# 2) Harmonize keys (fix type mismatch)
+# =========================
+# Keep GEOID as zero-padded character (width 5) everywhere
+panel[,  GEOID := str_pad(as.character(GEOID), 5, pad = "0")]
+wstate[, GEOID := str_pad(as.character(GEOID), 5, pad = "0")]
+
+# Ensure 'state' is character for clustering
+panel[, state := as.character(state)]
+
+# If a state_year FE string is not present, create it
+if (!"state_year" %in% names(panel)) {
+  panel[, state_year := paste0(state, "_", year)]
+}
+
+# =========================
+# 3) Design choices
+# =========================
+K_pre  <- 4  # leads: years before adoption kept in the stack
+K_post <- 2  # lags: years after adoption kept in the stack
+
+# =========================
+# 4) Build stacked event–study data
+# =========================
+keep_cols <- c(
+  "GEOID","year","state","death_rates_per_100_k","InvDist_exposure",
+  "population_density","ACS_PCT_AGE_18_44","ACS_PCT_AGE_45_64",
+  "ACS_PCT_AGE_ABOVE65","ACS_PCT_AGE_U18",
+  "prop_black","prop_asian","prop_other","prop_hispanic",
+  "ACS_MEDIAN_HH_INC","ACS_PCT_ENGL_NOT_WELL",
+  "ACS_PCT_UNEMPLOY","ACS_PCT_LT_HS",
+  "ACS_TOT_POP_WT","state_year"
+)
+
+stacked_es <- rbindlist(lapply(1:nrow(events), function(j) {
   
-  st  <- events$event_state[j]
-  t0  <- events$t0[j]
+  st <- events$event_state[j]
+  t0 <- events$t0[j]
   
-  # copy relevant columns only (keeps memory low)
-  tmp <- panel[, .(
-    GEOID, year, state, death_rates_per_100_k,InvDist_exposure,
-    population_density, ACS_PCT_AGE_18_44, ACS_PCT_AGE_45_64,
-    prop_black, prop_asian, prop_other, prop_hispanic,
-    ACS_MEDIAN_HH_INC, ACS_PCT_ENGL_NOT_WELL,
-    ACS_PCT_UNEMPLOY, ACS_PCT_LT_HS,
-    ACS_TOT_POP_WT, state_year                   # FE string
-  )]
+  # Copy minimal slice
+  tmp <- panel[, ..keep_cols]
   
-  tmp[, `:=`(
-    event_id  = st,                 # identifier for fixed effects
-    rel_year  = year - t0           # event time
-  )]
+  # Event label and relative year
+  tmp[, `:=`(event_id = st,
+             rel_year = year - t0)]
   
+  # Keep window [-K_pre, K_post]
   tmp <- tmp[rel_year >= -K_pre & rel_year <= K_post]
   
-  # attach *time-invariant* exposure w_i^(st)
-  tmp <- merge(tmp,
-               wstate[event_state == st, .(GEOID, exposure)],
-               by = "GEOID", all.x = TRUE)
-  tmp[is.na(exposure), exposure := 0]   # counties with no ties to st
-  return(tmp)
-}))
+  # Left join time-invariant exposure w_i^(st) for this treated state
+  exp_st <- wstate[event_state == st, .(GEOID, exposure)]
+  tmp <- merge(tmp, exp_st, by = "GEOID", all.x = TRUE)
+  
+  # Counties with no social ties to st get exposure = 0
+  tmp[is.na(exposure), exposure := 0]
+  
+  tmp
+}), use.names = TRUE, fill = TRUE)
 
-# --- after stacked_es is built ---------------------------------
-stacked_es[, exposure := scale(exposure)[,1]]   # global z-score
+# Global z-score of exposure in the stacked data
+stacked_es[, exposure := scale(exposure)[, 1]]
 
-
-
-# ------------------------------------------------------------
-# 3.  Estimate Wilson-style specification
-# ------------------------------------------------------------
-covars <- c("population_density", "ACS_PCT_AGE_18_44", "ACS_PCT_AGE_45_64",
-            "prop_black", "prop_asian", "prop_other", "prop_hispanic",
-            "ACS_MEDIAN_HH_INC", "ACS_PCT_ENGL_NOT_WELL",
-            "ACS_PCT_UNEMPLOY", "ACS_PCT_LT_HS")
-
-fml <- death_rates_per_100_k ~ exposure:i(rel_year, ref = -1)+InvDist_exposure+
-  population_density + ACS_PCT_AGE_18_44 + ACS_PCT_AGE_45_64 +
+# =========================
+# 5) Estimate Wilson-style specification
+# =========================
+# FE: county-by-event_id and state_year-by-event_id (as in your code)
+# Controls: as in your code
+fml <- death_rates_per_100_k ~
+  exposure:i(rel_year, ref = -1) + InvDist_exposure +
+  population_density + ACS_PCT_AGE_U18 + ACS_PCT_AGE_18_44 +
+  ACS_PCT_AGE_45_64 + ACS_PCT_AGE_ABOVE65 +
   prop_black + prop_asian + prop_other + prop_hispanic +
   ACS_MEDIAN_HH_INC + ACS_PCT_ENGL_NOT_WELL +
-  ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS  |
+  ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS | 
   GEOID^event_id + state_year^event_id
 
 est_es <- feols(
   fml,
   data    = stacked_es,
-  weights = ~ACS_TOT_POP_WT,
-  cluster = ~state
+  weights = ~ ACS_TOT_POP_WT,
+  cluster = ~ state
 )
 
+# Quick diagnostic: count support by event time and exposure>0
+print(table(stacked_es$rel_year, stacked_es$exposure > 0))
 
-table(stacked_es$rel_year, stacked_es$exposure > 0)   # TRUE if some exposure
+# =========================
+# 6) Coefficient table for plotting
+# =========================
+coef_df <- broom::tidy(est_es)[
+  grepl("^exposure:rel_year", broom::tidy(est_es)$term),
+] 
+coef_df$rel_year <- as.integer(stringr::str_extract(coef_df$term, "-?\\d+"))
+coef_df <- coef_df[order(coef_df$rel_year), ]
 
-
-# ------------------------------------------------------------
-# 4.  Coefficient table for plotting
-# ------------------------------------------------------------
-coef_df <- broom::tidy(est_es) |>
-  filter(str_detect(term, "^exposure:rel_year")) |>
-  mutate(
-    rel_year = as.integer(str_extract(term, "-?\\d+"))    # pull the ±k
-  ) |>
-  arrange(rel_year)                                       # chronological order
-
-
-# ------------------------------------------------------------
-# 5.  Illustrative plot 
-# ------------------------------------------------------------
+# =========================
+# 7) Event-study plot
+# =========================
 ggplot(coef_df, aes(x = rel_year, y = estimate)) +
-  geom_hline(yintercept = 0, linetype = "dashed", linewidth = .25) +
-  geom_vline(xintercept = 0, linetype = "dotted", linewidth = .25) +
-  geom_line(linewidth = .4) +
-  geom_pointrange(aes(ymin = estimate - 1.96*std.error,
-                      ymax = estimate + 1.96*std.error),
-                  size = .35) +
+  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.25) +
+  geom_vline(xintercept = 0, linetype = "dotted", linewidth = 0.25) +
+  geom_line(linewidth = 0.5) +
+  geom_pointrange(aes(ymin = estimate - 1.96 * std.error,
+                      ymax = estimate + 1.96 * std.error),
+                  size = 0.4) +
   labs(x = "Years relative to ERPO adoption",
-       y = "Coefficient Estimate") +
-  theme_minimal(base_size = 9)
+       y = "Coefficient estimate (per 100,000)") +
+  theme_minimal(base_size = 10)
 
-### direct effect plot did ###
+# =========================
+# 8) (Optional) DID 'did' package block without breaking FIPS
+# =========================
+# Keep character GEOID for joins; create a separate integer id for did::att_gt
+panel[, id_int := as.integer(factor(GEOID))]
 
-### direct effect estimation ###
-
-# estimate group-time average treatment effects without covariates
-my_data_with_spatial_g$GEOID <- as.numeric(my_data_with_spatial_g$GEOID)
-my_data_with_spatial_g$year <- as.numeric(my_data_with_spatial_g$year)
-
-
-mw.attgt <- att_gt(yname = "death_rates_per_100_k",
-                   gname = "start_year",
-                   idname = "GEOID",
-                   tname = "year",
-                   xformla = ~ population_density + ACS_PCT_AGE_18_44 + ACS_PCT_AGE_45_64 +
-                     prop_black + prop_asian + prop_other + prop_hispanic +
-                     ACS_MEDIAN_HH_INC + ACS_PCT_ENGL_NOT_WELL +
-                     ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS,
-                   data = my_data_with_spatial_g,
-                   weightsname    = "ACS_TOT_POP_WT",
-                   control_group = "nevertreated",
-                   est_method = "reg",
-                   clustervars   = "state"
-)
-
-# summarize the results
-summary(mw.attgt)
-
-
-mw.dyn.balance <- aggte(
-  mw.attgt,
-  type   = "dynamic",
-  min_e  = -4,    # three leads (years before treatment)
-  max_e  =  2,    # four lags (years after treatment)
-  na.rm  = TRUE
-)
-
-
-summary(mw.dyn.balance)
-
-ggdid(mw.dyn.balance)
-
-
+# Example call (if you need it):
+# library(did)
+# mw.attgt <- att_gt(
+#   yname    = "death_rates_per_100_k",
+#   gname    = "start_year",
+#   idname   = "id_int",
+#   tname    = "year",
+#   xformla  = ~ population_density + ACS_PCT_AGE_U18 + ACS_PCT_AGE_18_44 +
+#               ACS_PCT_AGE_45_64 + ACS_PCT_AGE_ABOVE65 +
+#               prop_black + prop_asian + prop_other + prop_hispanic +
+#               ACS_MEDIAN_HH_INC + ACS_PCT_ENGL_NOT_WELL +
+#               ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS,
+#   data       = panel,
+#   weightsname= "ACS_TOT_POP_WT",
+#   control_group = "nevertreated",
+#   est_method    = "reg",
+#   clustervars   = "state"
+# )
+# mw.dyn <- aggte(mw.attgt, type = "dynamic", min_e = -4, max_e = 2, na.rm = TRUE)
+# ggdid(mw.dyn)
