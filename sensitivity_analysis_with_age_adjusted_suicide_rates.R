@@ -1287,7 +1287,7 @@ ggplot(ci_df,
                       guide = "none") +
   
   ## axis labels
-  labs(x = "Change in focal-county suicide mortality (per 100,000)\nfor a 1-SD increase in ERPO social exposure", y = NULL) +
+  labs(x = "Change in focal-county age-adjusted suicide mortality (per 100,000)\nfor a 1-SD increase in ERPO social exposure", y = NULL) +
   
   ## styling
   theme_classic(base_size = 12) +
@@ -1473,7 +1473,7 @@ ggplot(ci_df,
                               "social"         = "Model 1")) +
   ## axis labels
   labs(
-    x = "Change in focal-county suicide mortality (per 100,000)\nfor a 1-SD increase in socially proximal counties suicide rate",
+    x = "Change in focal-county age-adjusted suicide mortality (per 100,000)\nfor a 1-SD increase in socially proximal counties suicide rate",
     y = NULL
   ) +
   ## larger fonts (x-ticks and x-label)
@@ -1491,24 +1491,20 @@ stargazer(
   socio_spatial_proximity,
   type = "latex",
   title = paste0(
-    "Socio-spatial diffusion effects on county-level mortality rates (deaths per 100\\,000). ",
-    "Coefficient estimates are from two population-weighted least-squares models with county ($i$) ",
-    "and year ($t$) fixed effects. Column~(1) isolates \\emph{social diffusion} by regressing death ",
-    "rates on standardized deaths in socially connected counties ($s_{-it}^{z}$). Column~(2) adds ",
-    "standardized deaths in geographically adjacent counties ($d_{-it}^{z}$) to disentangle social ",
-    "from spatial propagation. Both specifications control for population density, age composition, ",
-    "racial/ethnic composition, median household income, limited-English proficiency, unemployment, ",
-    "and educational attainment. Standard errors are clustered by state to accommodate arbitrary ",
-    "spatial and temporal autocorrelation. The social-exposure coefficient remains large and significant ",
-    "(\\textasciitilde3.0 additional deaths per 100\\,000) after adjusting for spatial proximity; the ",
-    "spatial-exposure coefficient is positive and significant (\\textasciitilde0.9). Model fit is high ",
-    "in both cases ($R^{2}_{\\text{within}} \\approx 0.946$). Significance levels: *$p<0.05$; ",
-    "**$p<0.01$; ***$p<0.001$." ),
+    "Two-way fixed effect estimates of socio-spatial influence on \\textit{age-adjusted} suicide mortality. ",
+    "Column~(1) presents estimates from a model regressing county-level age-adjusted suicide mortality ($\\tilde{y}_{it}$) ",
+    "on standardized deaths in socially connected counties ($\\tilde{s}_{-it}$). Column~(2) additionally controls for ",
+    "standardized deaths in spatial proximity ($\\tilde{d}_{-it}$) to isolate social influence from geographic proximity. ",
+    "Both models include county and year fixed effects and control for population density, racial composition (percentages Asian, Black, and Other races), ",
+    "ethnicity (percentage Hispanic), median household income, percentage with limited English proficiency, unemployment rate, ",
+    "and percentage with less than a high school education. Age distribution variables are excluded, as the dependent variable ",
+    "is already adjusted for population structure. Standard errors are clustered at the state level."
+  ),
   column.labels = c("Social Proximity Only", "Socio-Spatial Proximity"),
-  dep.var.labels = "Deaths per 100K",
+  dep.var.labels = "Age-adjusted deaths per 100K",
   covariate.labels = c(
-    "s_{-it}",
-    "d_{-it}",
+    "$\\tilde{s}_{-it}$",
+    "$\\tilde{d}_{-it}$",
     "Population Density",
     "Percent Black",
     "Percent Asian",
@@ -1516,7 +1512,7 @@ stargazer(
     "Percent Hispanic",
     "Median Household Income",
     "Percent of population who do not speak English that well",
-    "Percent unemployed ",
+    "Percent unemployed",
     "Percent with less than high school education"
   ),
   keep.stat = c("n", "rsq", "adj.rsq", "f"),
@@ -1524,8 +1520,9 @@ stargazer(
   omit.stat = "ser",
   omit.table.layout = "n",
   column.sep.width = "1pt",
-  out = "output_table.tex"
+  out = "sensitivity_socio_spatial_table.tex"
 )
+
 ### event study code ####
 # 1) Inputs (from your workspace)
 # =========================
@@ -1656,3 +1653,5 @@ ggplot(coef_df, aes(x = rel_year, y = estimate)) +
 # =========================
 # Keep character GEOID for joins; create a separate integer id for did::att_gt
 panel[, id_int := as.integer(factor(GEOID))]
+
+

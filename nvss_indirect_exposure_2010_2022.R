@@ -868,9 +868,9 @@ my_data_with_spatial_g[covariates] <- as.data.frame(lapply(my_data_with_spatial_
 
 ## no spill over ####
 did_no_spill <- felm(
-  death_rates_per_100_k ~ D_it+ population_density +ACS_PCT_AGE_U18+ ACS_PCT_AGE_18_44 
-  + ACS_PCT_AGE_45_64 +ACS_PCT_AGE_ABOVE65+
-    prop_black + prop_asian + prop_other + prop_hispanic +     
+  death_rates_per_100_k ~ D_it+   population_density +ACS_PCT_AGE_U18+ ACS_PCT_AGE_18_44 
+  + ACS_PCT_AGE_45_64+ prop_asian +
+    prop_black +  prop_other + prop_hispanic +     
     ACS_MEDIAN_HH_INC + 
     ACS_PCT_ENGL_NOT_WELL + 
     ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS 
@@ -887,8 +887,8 @@ summary(did_no_spill)
 did_spill_spatial <- felm(
   death_rates_per_100_k ~ InvDist_exposure+
     population_density +ACS_PCT_AGE_U18+ ACS_PCT_AGE_18_44 
-  + ACS_PCT_AGE_45_64 +ACS_PCT_AGE_ABOVE65+
-    prop_black + prop_asian + prop_other + prop_hispanic +     
+  + ACS_PCT_AGE_45_64+ prop_asian +
+    prop_black +  prop_other + prop_hispanic +     
     ACS_MEDIAN_HH_INC + 
     ACS_PCT_ENGL_NOT_WELL + 
     ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS 
@@ -903,8 +903,8 @@ summary(did_spill_spatial)
 did_spill_social <- felm(
   death_rates_per_100_k ~  ERPO_exposure +
     population_density +ACS_PCT_AGE_U18+ ACS_PCT_AGE_18_44 
-  + ACS_PCT_AGE_45_64 +ACS_PCT_AGE_ABOVE65+
-    prop_black + prop_asian + prop_other + prop_hispanic +     
+  + ACS_PCT_AGE_45_64+ prop_asian +
+    prop_black +  prop_other + prop_hispanic +     
     ACS_MEDIAN_HH_INC + 
     ACS_PCT_ENGL_NOT_WELL + 
     ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS 
@@ -918,9 +918,9 @@ summary(did_spill_social)
 
 ### spatial and social spillover ####
 did_spill_social_spatial <- felm(
-  death_rates_per_100_k ~ ERPO_exposure +  InvDist_exposure + population_density +ACS_PCT_AGE_U18+ ACS_PCT_AGE_18_44 
-  + ACS_PCT_AGE_45_64 +ACS_PCT_AGE_ABOVE65+
-    prop_black + prop_asian + prop_other + prop_hispanic +     
+  death_rates_per_100_k ~ ERPO_exposure +  InvDist_exposure+population_density +ACS_PCT_AGE_U18+ ACS_PCT_AGE_18_44 
+  + ACS_PCT_AGE_45_64+ prop_asian +
+    prop_black +  prop_other + prop_hispanic +     
     ACS_MEDIAN_HH_INC + 
     ACS_PCT_ENGL_NOT_WELL + 
     ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS 
@@ -1089,18 +1089,17 @@ stargazer(
     "ERPO",                       # from did_no_spill
     "ERPO Social Exposure", # ERPO_exposure in did_spill_social
     "ERPO Spatial Exposure",
-    "Population Density",
+    "Population density",
     "Percent aged below 18",
     "Percent aged 18-44", 
     "Percent aged 45-64",
-    "Precent aged above 65",
-    "Percent Black",
     "Percent Asian",
+    "Percent Black",
     "Percent Other",
     "Percent Hispanic",
-    "Median Household Income",
-    "Percent of population who do not speak English that well",
-    "Percent unemployed ",
+    "Median household income ",
+    "Percent with limited English proficiency",
+    "Percent unemployed",
     "Percent with less than high school education"
   )
   ,
@@ -1209,8 +1208,8 @@ my_data_with_spatial_g[,  d_minus_i_z := as.numeric(scale(d_minus_i))]
 proximity <- felm(
   death_rates_per_100_k ~ s_minus_i_z +
     population_density +ACS_PCT_AGE_U18+ ACS_PCT_AGE_18_44 
-  + ACS_PCT_AGE_45_64 +ACS_PCT_AGE_ABOVE65+
-    prop_black + prop_asian + prop_other + prop_hispanic +     
+  + ACS_PCT_AGE_45_64+
+  prop_asian +   prop_black +  prop_other + prop_hispanic +     
     ACS_MEDIAN_HH_INC + 
     ACS_PCT_ENGL_NOT_WELL + 
     ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS 
@@ -1218,14 +1217,13 @@ proximity <- felm(
   data = my_data_with_spatial_g,
   weights = my_data_with_spatial_g$ACS_TOT_POP_WT
 )
-
 summary(proximity)
 
 socio_spatial_proximity <-  felm(
   death_rates_per_100_k ~ s_minus_i_z + d_minus_i_z+
     population_density +ACS_PCT_AGE_U18+ ACS_PCT_AGE_18_44 
-  + ACS_PCT_AGE_45_64 +ACS_PCT_AGE_ABOVE65+
-    prop_black + prop_asian + prop_other + prop_hispanic +     
+  + ACS_PCT_AGE_45_64+ prop_asian +
+    prop_black +  prop_other + prop_hispanic +     
     ACS_MEDIAN_HH_INC + 
     ACS_PCT_ENGL_NOT_WELL + 
     ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS 
@@ -1233,7 +1231,6 @@ socio_spatial_proximity <-  felm(
   data = my_data_with_spatial_g,
   weights = my_data_with_spatial_g$ACS_TOT_POP_WT
 )
-
 summary(socio_spatial_proximity)
 ### proximity plots ####
 
@@ -1297,20 +1294,19 @@ stargazer(
   column.labels = c("Social Proximity Only", "Socio-Spatial Proximity"),
   dep.var.labels = "Deaths per 100K",
   covariate.labels = c(
-    "s_{-it}",
-    "d_{-it}",
-    "Population Density",
+    "Deaths in social proximity $s_{-it}$",
+    "Deaths in spatial proximity $d_{-it}$",
+    "Population density",
     "Percent aged below 18",
     "Percent aged 18-44", 
     "Percent aged 45-64",
-    "Precent aged above 65",
-    "Percent Black",
     "Percent Asian",
+    "Percent Black",
     "Percent Other",
     "Percent Hispanic",
-    "Median Household Income",
-    "Percent of population who do not speak English that well",
-    "Percent unemployed ",
+    "Median household income ",
+    "Percent with limited English proficiency",
+    "Percent unemployed",
     "Percent with less than high school education"
   ),
   keep.stat = c("n", "rsq", "adj.rsq", "f"),
@@ -1473,3 +1469,9 @@ panel[, id_int := as.integer(factor(GEOID))]
 # )
 # mw.dyn <- aggte(mw.attgt, type = "dynamic", min_e = -4, max_e = 2, na.rm = TRUE)
 # ggdid(mw.dyn)
+
+
+
+#### mixed with social adn saptial exposure ###
+
+
