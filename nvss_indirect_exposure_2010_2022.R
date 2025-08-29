@@ -935,7 +935,7 @@ summary(did_spill_social_spatial)
 ## 1 ▸ Assemble the CI data
 ci_df <- bind_rows(
   tidy(did_spill_social,            conf.int = TRUE) |> mutate(model = "indirect social network exposure"),
-  tidy(did_spill_social_spatial, conf.int = TRUE) |> mutate(model = "robust indirect social network exposure")
+  tidy(did_spill_social_spatial, conf.int = TRUE) |> mutate(model = "indirect social network exposure (controls for Spatial Exposure)")
 ) |>
   filter(term == "ERPO_exposure")         # keep only the peer-exposure coefficient
 
@@ -943,33 +943,29 @@ ci_df <- bind_rows(
 ## 2 ▸ Dot-whisker plot matching the mock-up
 ggplot(ci_df,
        aes(x = estimate,
-           y = factor(model, levels = c("indirect social network exposure", "robust indirect social network exposure")),
+           y = factor(model, levels = c(
+             "indirect social network exposure",
+             "indirect social network exposure (controls for Spatial Exposure)"
+           )),
            colour = model)) +
-  
-  ## zero reference
   geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.6) +
-  
-  ## 95 % CIs with end-caps
   geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
                  height = 0, linewidth = 0.9) +
-  
-  ## point estimates
   geom_point(size = 3) +
-  
-  ## colour palette
-  scale_colour_manual(values = c("indirect social network exposure" = "red",
-                                 "robust indirect social network exposure" = "blue"),
-                      guide = "none") +
-  
-  ## axis labels
-  labs(x = "Change in focal-county suicide mortality (per 100,000)\nfor a 1-SD increase in ERPO social exposure", y = NULL) +
-  
-  ## styling
+  scale_colour_manual(values = c(
+    "indirect social network exposure" = "red",
+    "indirect social network exposure (controls for Spatial Exposure)" = "blue"
+  ), guide = "none") +
+  scale_y_discrete(labels = c(
+    "indirect social network exposure" = "indirect social network exposure",
+    "indirect social network exposure (controls for Spatial Exposure)" =
+      "indirect social network exposure\n(controls for Spatial Exposure)"
+  )) +
+  labs(x = "Change in focal-county suicide mortality (per 100,000)\nfor a 1-SD increase in ERPO social exposure",
+       y = NULL) +
   theme_classic(base_size = 12) +
-  theme(
-    panel.grid.major.y = element_line(colour = "grey85"),
-    axis.ticks.y      = element_blank()
-  )
+  theme(panel.grid.major.y = element_line(colour = "grey85"),
+        axis.ticks.y = element_blank())
 
 
 
@@ -1316,140 +1312,140 @@ stargazer(
   column.sep.width = "1pt",
   out = "output_table.tex"
 )
-### event study code ####
-  # 1) Inputs (from your workspace)
-  # =========================
-# my_data_with_spatial_g : county-year panel (data.frame/data.table)
-# w_i_state              : long weights: i_fips, j_state, w_is
-# policy_data            : state-level events: state, start_year (>0 = treated)
-
-# Convert to data.table
-panel  <- as.data.table(my_data_with_spatial_g)
-wstate <- as.data.table(w_i_state)
-
-# Standardize column names for the weights
-setnames(wstate, c("i_fips","j_state","w_is"), c("GEOID","event_state","exposure"))
-
-# Event list (only treated states with valid adoption years)
-events <- as.data.table(policy_data)[start_year > 0,
-                                     .(event_state = state, t0 = start_year)]
-
-# =========================
-# 2) Harmonize keys (fix type mismatch)
-# =========================
-# Keep GEOID as zero-padded character (width 5) everywhere
-panel[,  GEOID := str_pad(as.character(GEOID), 5, pad = "0")]
-wstate[, GEOID := str_pad(as.character(GEOID), 5, pad = "0")]
-
-# Ensure 'state' is character for clustering
-panel[, state := as.character(state)]
-
-# If a state_year FE string is not present, create it
-if (!"state_year" %in% names(panel)) {
-  panel[, state_year := paste0(state, "_", year)]
-}
-
-# =========================
-# 3) Design choices
-# =========================
-K_pre  <- 4  # leads: years before adoption kept in the stack
-K_post <- 2  # lags: years after adoption kept in the stack
-
-# =========================
-# 4) Build stacked event–study data
-# =========================
-keep_cols <- c(
-  "GEOID","year","state","death_rates_per_100_k","InvDist_exposure",
-  "population_density","ACS_PCT_AGE_18_44","ACS_PCT_AGE_45_64",
-  "ACS_PCT_AGE_ABOVE65","ACS_PCT_AGE_U18",
-  "prop_black","prop_asian","prop_other","prop_hispanic",
-  "ACS_MEDIAN_HH_INC","ACS_PCT_ENGL_NOT_WELL",
-  "ACS_PCT_UNEMPLOY","ACS_PCT_LT_HS",
-  "ACS_TOT_POP_WT","state_year"
-)
-
-stacked_es <- rbindlist(lapply(1:nrow(events), function(j) {
-  
-  st <- events$event_state[j]
-  t0 <- events$t0[j]
-  
-  # Copy minimal slice
-  tmp <- panel[, ..keep_cols]
-  
-  # Event label and relative year
-  tmp[, `:=`(event_id = st,
-             rel_year = year - t0)]
-  
-  # Keep window [-K_pre, K_post]
-  tmp <- tmp[rel_year >= -K_pre & rel_year <= K_post]
-  
-  # Left join time-invariant exposure w_i^(st) for this treated state
-  exp_st <- wstate[event_state == st, .(GEOID, exposure)]
-  tmp <- merge(tmp, exp_st, by = "GEOID", all.x = TRUE)
-  
-  # Counties with no social ties to st get exposure = 0
-  tmp[is.na(exposure), exposure := 0]
-  
-  tmp
-}), use.names = TRUE, fill = TRUE)
-
-# Global z-score of exposure in the stacked data
-stacked_es[, exposure := scale(exposure)[, 1]]
-
-# =========================
-# 5) Estimate Wilson-style specification
-# =========================
-# FE: county-by-event_id and state_year-by-event_id (as in your code)
-# Controls: as in your code
-fml <- death_rates_per_100_k ~
-  exposure:i(rel_year, ref = -1) + InvDist_exposure +
-  population_density + ACS_PCT_AGE_U18 + ACS_PCT_AGE_18_44 +
-  ACS_PCT_AGE_45_64 + ACS_PCT_AGE_ABOVE65 +
-  prop_black + prop_asian + prop_other + prop_hispanic +
-  ACS_MEDIAN_HH_INC + ACS_PCT_ENGL_NOT_WELL +
-  ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS | 
-  GEOID^event_id + state_year^event_id
-
-est_es <- feols(
-  fml,
-  data    = stacked_es,
-  weights = ~ ACS_TOT_POP_WT,
-  cluster = ~ state
-)
-
-# Quick diagnostic: count support by event time and exposure>0
-print(table(stacked_es$rel_year, stacked_es$exposure > 0))
-
-# =========================
-# 6) Coefficient table for plotting
-# =========================
-coef_df <- broom::tidy(est_es)[
-  grepl("^exposure:rel_year", broom::tidy(est_es)$term),
-] 
-coef_df$rel_year <- as.integer(stringr::str_extract(coef_df$term, "-?\\d+"))
-coef_df <- coef_df[order(coef_df$rel_year), ]
-
-# =========================
-# 7) Event-study plot
-# =========================
-ggplot(coef_df, aes(x = rel_year, y = estimate)) +
-  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.25) +
-  geom_vline(xintercept = 0, linetype = "dotted", linewidth = 0.25) +
-  geom_line(linewidth = 0.5) +
-  geom_pointrange(aes(ymin = estimate - 1.96 * std.error,
-                      ymax = estimate + 1.96 * std.error),
-                  size = 0.4) +
-  labs(x = "Years relative to ERPO adoption",
-       y = "Coefficient estimate (per 100,000)") +
-  theme_minimal(base_size = 10)
-
-# =========================
-# 8) (Optional) DID 'did' package block without breaking FIPS
-# =========================
-# Keep character GEOID for joins; create a separate integer id for did::att_gt
-panel[, id_int := as.integer(factor(GEOID))]
-
-# Example call (if you need it):
+# ### event study code ####
+#   # 1) Inputs (from your workspace)
+#   # =========================
+# # my_data_with_spatial_g : county-year panel (data.frame/data.table)
+# # w_i_state              : long weights: i_fips, j_state, w_is
+# # policy_data            : state-level events: state, start_year (>0 = treated)
+# 
+# # Convert to data.table
+# panel  <- as.data.table(my_data_with_spatial_g)
+# wstate <- as.data.table(w_i_state)
+# 
+# # Standardize column names for the weights
+# setnames(wstate, c("i_fips","j_state","w_is"), c("GEOID","event_state","exposure"))
+# 
+# # Event list (only treated states with valid adoption years)
+# events <- as.data.table(policy_data)[start_year > 0,
+#                                      .(event_state = state, t0 = start_year)]
+# 
+# # =========================
+# # 2) Harmonize keys (fix type mismatch)
+# # =========================
+# # Keep GEOID as zero-padded character (width 5) everywhere
+# panel[,  GEOID := str_pad(as.character(GEOID), 5, pad = "0")]
+# wstate[, GEOID := str_pad(as.character(GEOID), 5, pad = "0")]
+# 
+# # Ensure 'state' is character for clustering
+# panel[, state := as.character(state)]
+# 
+# # If a state_year FE string is not present, create it
+# if (!"state_year" %in% names(panel)) {
+#   panel[, state_year := paste0(state, "_", year)]
+# }
+# 
+# # =========================
+# # 3) Design choices
+# # =========================
+# K_pre  <- 4  # leads: years before adoption kept in the stack
+# K_post <- 2  # lags: years after adoption kept in the stack
+# 
+# # =========================
+# # 4) Build stacked event–study data
+# # =========================
+# keep_cols <- c(
+#   "GEOID","year","state","death_rates_per_100_k","InvDist_exposure",
+#   "population_density","ACS_PCT_AGE_18_44","ACS_PCT_AGE_45_64",
+#   "ACS_PCT_AGE_ABOVE65","ACS_PCT_AGE_U18",
+#   "prop_black","prop_asian","prop_other","prop_hispanic",
+#   "ACS_MEDIAN_HH_INC","ACS_PCT_ENGL_NOT_WELL",
+#   "ACS_PCT_UNEMPLOY","ACS_PCT_LT_HS",
+#   "ACS_TOT_POP_WT","state_year"
+# )
+# 
+# stacked_es <- rbindlist(lapply(1:nrow(events), function(j) {
+#   
+#   st <- events$event_state[j]
+#   t0 <- events$t0[j]
+#   
+#   # Copy minimal slice
+#   tmp <- panel[, ..keep_cols]
+#   
+#   # Event label and relative year
+#   tmp[, `:=`(event_id = st,
+#              rel_year = year - t0)]
+#   
+#   # Keep window [-K_pre, K_post]
+#   tmp <- tmp[rel_year >= -K_pre & rel_year <= K_post]
+#   
+#   # Left join time-invariant exposure w_i^(st) for this treated state
+#   exp_st <- wstate[event_state == st, .(GEOID, exposure)]
+#   tmp <- merge(tmp, exp_st, by = "GEOID", all.x = TRUE)
+#   
+#   # Counties with no social ties to st get exposure = 0
+#   tmp[is.na(exposure), exposure := 0]
+#   
+#   tmp
+# }), use.names = TRUE, fill = TRUE)
+# 
+# # Global z-score of exposure in the stacked data
+# stacked_es[, exposure := scale(exposure)[, 1]]
+# 
+# # =========================
+# # 5) Estimate Wilson-style specification
+# # =========================
+# # FE: county-by-event_id and state_year-by-event_id (as in your code)
+# # Controls: as in your code
+# fml <- death_rates_per_100_k ~
+#   exposure:i(rel_year, ref = -1) + InvDist_exposure +
+#   population_density + ACS_PCT_AGE_U18 + ACS_PCT_AGE_18_44 +
+#   ACS_PCT_AGE_45_64 + ACS_PCT_AGE_ABOVE65 +
+#   prop_black + prop_asian + prop_other + prop_hispanic +
+#   ACS_MEDIAN_HH_INC + ACS_PCT_ENGL_NOT_WELL +
+#   ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS | 
+#   GEOID^event_id + state_year^event_id
+# 
+# est_es <- feols(
+#   fml,
+#   data    = stacked_es,
+#   weights = ~ ACS_TOT_POP_WT,
+#   cluster = ~ state
+# )
+# 
+# # Quick diagnostic: count support by event time and exposure>0
+# print(table(stacked_es$rel_year, stacked_es$exposure > 0))
+# 
+# # =========================
+# # 6) Coefficient table for plotting
+# # =========================
+# coef_df <- broom::tidy(est_es)[
+#   grepl("^exposure:rel_year", broom::tidy(est_es)$term),
+# ] 
+# coef_df$rel_year <- as.integer(stringr::str_extract(coef_df$term, "-?\\d+"))
+# coef_df <- coef_df[order(coef_df$rel_year), ]
+# 
+# # =========================
+# # 7) Event-study plot
+# # =========================
+# ggplot(coef_df, aes(x = rel_year, y = estimate)) +
+#   geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.25) +
+#   geom_vline(xintercept = 0, linetype = "dotted", linewidth = 0.25) +
+#   geom_line(linewidth = 0.5) +
+#   geom_pointrange(aes(ymin = estimate - 1.96 * std.error,
+#                       ymax = estimate + 1.96 * std.error),
+#                   size = 0.4) +
+#   labs(x = "Years relative to ERPO adoption",
+#        y = "Coefficient estimate (per 100,000)") +
+#   theme_minimal(base_size = 10)
+# 
+# # =========================
+# # 8) (Optional) DID 'did' package block without breaking FIPS
+# # =========================
+# # Keep character GEOID for joins; create a separate integer id for did::att_gt
+# panel[, id_int := as.integer(factor(GEOID))]
+# 
+# # Example call (if you need it):
 # library(did)
 # mw.attgt <- att_gt(
 #   yname    = "death_rates_per_100_k",
