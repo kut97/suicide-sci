@@ -1194,6 +1194,341 @@ normalised <- function(x)
 # Apply Min-Max scaling after Z-score standardization
 my_data_with_spatial_g[covariates] <- as.data.frame(lapply(my_data_with_spatial_g[covariates], normalised))
 
+# Political Affiliation Integration for Suicide Analysis (2010-2022)
+
+# Function to process the 2008-2016 election data
+process_election_data_0816 <- function(file_path) {
+  
+  # Check if file exists
+  if (!file.exists(file_path)) {
+    cat("Warning: File not found:", file_path, "\n")
+    return(tibble())
+  }
+  
+  # Read the 2008-2016 data
+  election_0816 <- read_csv(file_path, show_col_types = FALSE)
+  
+  # Process each election year
+  political_results <- tibble()
+  
+  # 2008 Election
+  election_2008 <- election_0816 %>%
+    select(fips_code, dem_2008, gop_2008) %>%
+    filter(!is.na(fips_code), !is.na(dem_2008), !is.na(gop_2008)) %>%
+    mutate(
+      GEOID = str_pad(as.character(fips_code), width = 5, pad = "0"),
+      political_affiliation = as.integer(gop_2008 > dem_2008),
+      election_year = 2008
+    ) %>%
+    select(GEOID, political_affiliation, election_year)
+  
+  # 2012 Election
+  election_2012 <- election_0816 %>%
+    select(fips_code, dem_2012, gop_2012) %>%
+    filter(!is.na(fips_code), !is.na(dem_2012), !is.na(gop_2012)) %>%
+    mutate(
+      GEOID = str_pad(as.character(fips_code), width = 5, pad = "0"),
+      political_affiliation = as.integer(gop_2012 > dem_2012),
+      election_year = 2012
+    ) %>%
+    select(GEOID, political_affiliation, election_year)
+  
+  # 2016 Election
+  election_2016 <- election_0816 %>%
+    select(fips_code, dem_2016, gop_2016) %>%
+    filter(!is.na(fips_code), !is.na(dem_2016), !is.na(gop_2016)) %>%
+    mutate(
+      GEOID = str_pad(as.character(fips_code), width = 5, pad = "0"),
+      political_affiliation = as.integer(gop_2016 > dem_2016),
+      election_year = 2016
+    ) %>%
+    select(GEOID, political_affiliation, election_year)
+  
+  # Combine all years
+  political_results <- bind_rows(election_2008, election_2012, election_2016)
+  
+  return(political_results)
+}
+
+# Function to process the 2020 election data
+process_election_data_2020 <- function(file_path) {
+  
+  # Check if file exists
+  if (!file.exists(file_path)) {
+    cat("Warning: File not found:", file_path, "\n")
+    return(tibble())
+  }
+  
+  # Read the 2020 data
+  election_2020 <- read_csv(file_path, show_col_types = FALSE)
+  
+  # Process 2020 election
+  election_2020 <- election_2020 %>%
+    filter(!is.na(county_fips), !is.na(votes_dem), !is.na(votes_gop)) %>%
+    mutate(
+      GEOID = str_pad(as.character(county_fips), width = 5, pad = "0"),
+      political_affiliation = as.integer(votes_gop > votes_dem),
+      election_year = 2020
+    ) %>%
+    select(GEOID, political_affiliation, election_year)
+  
+  return(election_2020)
+}
+
+# Process both election datasets
+cat("Processing 2008-2016 election data...\n")
+political_0816 <- process_election_data_0816("C:/Users/kusha/Downloads/US_County_Level_Presidential_Results_08-16.csv")
+
+cat("Processing 2020 election data...\n") 
+political_2020 <- process_election_data_2020("C:/Users/kusha/Downloads/US_County_Level_Presidential_Results_2020.csv")
+
+# Combine all election results
+all_political_results <- bind_rows(political_0816, political_2020)
+
+# Check if we have any political data
+if (nrow(all_political_results) == 0) {
+  cat("ERROR: No political data loaded. Check file paths:\n")
+  cat("- C:/Users/kusha/Downloads/US_County_Level_Presidential_Results_08-16.csv\n")
+  cat("- C:/Users/kusha/Downloads/US_County_Level_Presidential_Results_2020.csv\n")
+  cat("Skipping political affiliation analysis...\n")
+} else {
+  # Handle Shannon County rename (FIPS 46113 -> 46102)
+  all_political_results <- all_political_results %>%
+    mutate(GEOID = ifelse(GEOID == "46113", "46102", GEOID))
+  
+  # Display summary of available election data
+  cat("\nElection data summary:\n")
+  all_political_results %>%
+    group_by(election_year) %>%
+    summarise(
+      counties = n(),
+      pct_republican = round(mean(political_affiliation, na.rm = TRUE) * 100, 1),
+      .groups = "drop"
+    ) %>%
+    print()
+  
+  # Create the assignment logic for analysis years (2010-2022)
+  assign_political_affiliation <- function() {
+    
+    # Create the mapping based on your logic
+    year_assignments <- tibble(
+      analysis_year = 2010:2022,
+      election_year = case_when(
+        analysis_year %in% c(2010, 2011) ~ 2008,
+        analysis_year == 2012 ~ 2012,
+        analysis_year %in% c(2013, 2014, 2015) ~ 2012,
+        analysis_year == 2016 ~ 2016,
+        analysis_year %in% c(2017, 2018, 2019) ~ 2016,
+        analysis_year == 2020 ~ 2020,
+        analysis_year %in% c(2021, 2022) ~ 2020,
+        TRUE ~ NA_real_
+      )
+    )
+    
+    cat("Year assignment logic:\n")
+    print(year_assignments)
+    
+    # Create the political affiliation dataset for all analysis years
+    political_panel <- year_assignments %>%
+      left_join(all_political_results, by = "election_year") %>%
+      select(GEOID, analysis_year, political_affiliation) %>%
+      rename(year = analysis_year) %>%
+      filter(!is.na(GEOID), !is.na(political_affiliation))
+    
+    return(political_panel)
+  }
+  
+  # Create the political affiliation panel
+  political_panel <- assign_political_affiliation()
+  
+  # Merge with your main dataset and identify missing counties
+  if (exists("my_data_with_spatial_g")) {
+    
+    analysis_counties <- unique(my_data_with_spatial_g$GEOID)
+    political_counties <- unique(political_panel$GEOID)
+    matched_counties <- intersect(analysis_counties, political_counties)
+    missing_counties <- setdiff(analysis_counties, political_counties)
+    
+    cat("\nCounty matching summary:\n")
+    cat("Analysis counties:", length(analysis_counties), "\n")
+    cat("Political counties:", length(political_counties), "\n")
+    cat("Matched counties:", length(matched_counties), "\n")
+    cat("Missing from political data:", length(missing_counties), "\n")
+    
+    # Show missing counties
+    if (length(missing_counties) > 0) {
+      cat("\nMissing counties (GEOID):\n")
+      print(missing_counties)
+      
+      # Get details about missing counties from your main dataset
+      missing_county_details <- my_data_with_spatial_g %>%
+        filter(GEOID %in% missing_counties) %>%
+        select(GEOID, state, county_fips, state_fips) %>%
+        distinct() %>%
+        arrange(state, GEOID)
+      
+      cat("\nMissing counties details:\n")
+      print(missing_county_details)
+    }
+    
+    # Merge with your main dataset
+    cat("\nMerging political affiliation into main dataset...\n")
+    
+    my_data_with_spatial_g <- my_data_with_spatial_g %>%
+      left_join(
+        political_panel %>% select(GEOID, year, political_affiliation),
+        by = c("GEOID", "year")
+      )
+    
+    # Check if political_affiliation column was created successfully
+    if (!"political_affiliation" %in% names(my_data_with_spatial_g)) {
+      cat("ERROR: political_affiliation column not created properly.\n")
+    } else {
+      # Count successful merges and identify missing observations
+      total_observations <- nrow(my_data_with_spatial_g)
+      successful_merges <- my_data_with_spatial_g %>%
+        filter(!is.na(political_affiliation)) %>%
+        nrow()
+      
+      missing_observations <- my_data_with_spatial_g %>%
+        filter(is.na(political_affiliation)) %>%
+        nrow()
+      
+      cat("Political affiliation successfully merged!\n")
+      cat("Successful merges:", successful_merges, "out of", total_observations, "observations\n")
+      cat("Missing observations:", missing_observations, "\n")
+      
+      # Detailed analysis of missing observations
+      if (missing_observations > 0) {
+        cat("\nDetailed analysis of missing observations:\n")
+        
+        missing_obs_details <- my_data_with_spatial_g %>%
+          filter(is.na(political_affiliation)) %>%
+          group_by(GEOID, state) %>%
+          summarise(
+            years_missing = n(),
+            first_year = min(year),
+            last_year = max(year),
+            .groups = "drop"
+          ) %>%
+          arrange(state, GEOID)
+        
+        cat("Counties with missing political affiliation data:\n")
+        print(missing_obs_details)
+        
+        # Summary by state
+        cat("\nMissing observations by state:\n")
+        missing_by_state <- my_data_with_spatial_g %>%
+          filter(is.na(political_affiliation)) %>%
+          group_by(state) %>%
+          summarise(
+            missing_observations = n(),
+            unique_counties = n_distinct(GEOID),
+            .groups = "drop"
+          ) %>%
+          arrange(desc(missing_observations))
+        
+        print(missing_by_state)
+      }
+      
+      # Add political_affiliation to covariates if it exists
+      if (exists("covariates")) {
+        covariates_updated <- c(covariates, "political_affiliation")
+        assign("covariates", covariates_updated, envir = .GlobalEnv)
+        cat("\nUpdated covariates list includes: political_affiliation\n")
+      }
+      
+      # Apply Alaska county imputation based on actual election data analysis
+      if (missing_observations > 0) {
+        cat("\nApplying Alaska county imputation...\n")
+        
+        # Alaska imputation based on actual election data from countypres_20002024.csv
+        alaska_imputation <- tribble(
+          ~GEOID, ~year, ~political_affiliation, ~source,
+          
+          # DISTRICT 13 (02013) - Consistently Republican based on actual election data
+          "02013", 2010, 1, "actual_election",  "02013", 2011, 1, "actual_election",
+          "02013", 2012, 1, "actual_election",  "02013", 2013, 1, "actual_election",
+          "02013", 2014, 1, "actual_election",  "02013", 2015, 1, "actual_election",
+          "02013", 2016, 1, "actual_election",  "02013", 2017, 1, "actual_election",
+          "02013", 2018, 1, "actual_election",  "02013", 2019, 1, "actual_election",
+          "02013", 2020, 1, "actual_election",  "02013", 2021, 1, "actual_election",
+          "02013", 2022, 1, "actual_election",
+          
+          # DISTRICT 16 (02016) - Rep 2008, Dem 2012-2020 based on actual election data
+          "02016", 2010, 1, "actual_election",  "02016", 2011, 1, "actual_election",
+          "02016", 2012, 0, "actual_election",  "02016", 2013, 0, "actual_election",
+          "02016", 2014, 0, "actual_election",  "02016", 2015, 0, "actual_election",
+          "02016", 2016, 0, "actual_election",  "02016", 2017, 0, "actual_election",
+          "02016", 2018, 0, "actual_election",  "02016", 2019, 0, "actual_election",
+          "02016", 2020, 0, "actual_election",  "02016", 2021, 0, "actual_election",
+          "02016", 2022, 0, "actual_election",
+          
+          # DISTRICT 20 (02020) - Rep 2008-2012, Dem 2016-2020 based on actual election data
+          "02020", 2010, 1, "actual_election",  "02020", 2011, 1, "actual_election",
+          "02020", 2012, 1, "actual_election",  "02020", 2013, 1, "actual_election",
+          "02020", 2014, 1, "actual_election",  "02020", 2015, 1, "actual_election",
+          "02020", 2016, 0, "actual_election",  "02020", 2017, 0, "actual_election",
+          "02020", 2018, 0, "actual_election",  "02020", 2019, 0, "actual_election",
+          "02020", 2020, 0, "actual_election",  "02020", 2021, 0, "actual_election",
+          "02020", 2022, 0, "actual_election"
+        ) %>%
+          # Add remaining Alaska counties using Republican pattern
+          bind_rows(
+            expand_grid(
+              GEOID = c("02050", "02060", "02068", "02070", "02090", "02100", "02105", 
+                        "02110", "02122", "02130", "02150", "02164", "02170", "02180", 
+                        "02185", "02188", "02195", "02198", "02220", "02230", "02240", 
+                        "02275", "02282", "02290"),
+              year = 2010:2022
+            ) %>%
+              mutate(
+                political_affiliation = 1,  # Republican
+                source = "alaska_pattern"
+              )
+          )
+        
+        # Apply Alaska imputation to missing observations
+        my_data_with_spatial_g <- my_data_with_spatial_g %>%
+          left_join(
+            alaska_imputation %>% 
+              filter(GEOID %in% missing_counties) %>%
+              select(GEOID, year, political_affiliation, source),
+            by = c("GEOID", "year"),
+            suffix = c("", "_alaska")
+          ) %>%
+          mutate(
+            political_affiliation = coalesce(political_affiliation, political_affiliation_alaska),
+            political_imputed = ifelse(!is.na(political_affiliation_alaska), 1, 0)
+          ) %>%
+          select(-political_affiliation_alaska, -source)
+        
+        # Final check
+        final_missing <- sum(is.na(my_data_with_spatial_g$political_affiliation))
+        alaska_imputed <- sum(my_data_with_spatial_g$political_imputed == 1, na.rm = TRUE)
+        
+        cat("Alaska imputation results:\n")
+        cat("Alaska observations imputed:", alaska_imputed, "\n")
+        cat("Final missing political_affiliation:", final_missing, "\n")
+        
+        if (final_missing == 0) {
+          cat("SUCCESS: All political affiliation data complete!\n")
+        }
+      }
+      
+      cat("\nPolitical affiliation integration complete!\n")
+      cat("Use 'political_affiliation' variable in your models (1=Republican, 0=Democrat)\n")
+    }
+    
+  } else {
+    cat("Error: my_data_with_spatial_g dataset not found in environment.\n")
+    cat("Please ensure your main analysis dataset is loaded before running this script.\n")
+  }
+}
+
+
+
+
 ### estimating the effects  ###
 
 did_no_spill <- felm(
@@ -1201,7 +1536,7 @@ did_no_spill <- felm(
     prop_black + prop_asian + prop_other + prop_hispanic +     
     ACS_MEDIAN_HH_INC + 
     ACS_PCT_ENGL_NOT_WELL + 
-    ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS 
+    ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS + political_affiliation
   | GEOID + year        # Fixed Effects
   | 0                    # No instrumental variables
   | state,               # Cluster by state
@@ -1218,7 +1553,7 @@ did_spill_spatial <- felm(
     prop_black + prop_asian + prop_other + prop_hispanic +     
     ACS_MEDIAN_HH_INC + 
     ACS_PCT_ENGL_NOT_WELL + 
-    ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS 
+    ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS + political_affiliation
   | GEOID + state_year | 0 | state, 
   data = my_data_with_spatial_g,
   weights = my_data_with_spatial_g$population_total
@@ -1233,7 +1568,7 @@ did_spill_social <- felm(
     prop_black + prop_asian + prop_other + prop_hispanic +     
     ACS_MEDIAN_HH_INC + 
     ACS_PCT_ENGL_NOT_WELL + 
-    ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS 
+    ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS + political_affiliation
   | GEOID + state_year | 0 | state, 
   data = my_data_with_spatial_g,
   weights = my_data_with_spatial_g$population_total
@@ -1248,7 +1583,7 @@ did_spill_social_spatial <- felm(
     prop_black + prop_asian + prop_other + prop_hispanic +     
     ACS_MEDIAN_HH_INC + 
     ACS_PCT_ENGL_NOT_WELL + 
-    ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS 
+    ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS + political_affiliation
   | GEOID + state_year | 0 |state ,
   data = my_data_with_spatial_g,
   weights = my_data_with_spatial_g$ACS_TOT_POP_WT
@@ -1257,10 +1592,11 @@ did_spill_social_spatial <- felm(
 summary(did_spill_social_spatial)
 
 ### creating plots ### 
-## 1 ▸ Assemble the CI data
+
+## 2 ▸ Dot-whisker plot matching the mock-up
 ci_df <- bind_rows(
   tidy(did_spill_social,            conf.int = TRUE) |> mutate(model = "indirect social network exposure"),
-  tidy(did_spill_social_spatial, conf.int = TRUE) |> mutate(model = "robust indirect social network exposure")
+  tidy(did_spill_social_spatial, conf.int = TRUE) |> mutate(model = "indirect social network exposure (controls for Spatial Exposure)")
 ) |>
   filter(term == "ERPO_exposure")         # keep only the peer-exposure coefficient
 
@@ -1268,23 +1604,24 @@ ci_df <- bind_rows(
 ## 2 ▸ Dot-whisker plot matching the mock-up
 ggplot(ci_df,
        aes(x = estimate,
-           y = factor(model, levels = c("indirect social network exposure", "robust indirect social network exposure")),
+           y = factor(model, levels = c(
+             "indirect social network exposure",
+             "indirect social network exposure (controls for Spatial Exposure)"
+           )),
            colour = model)) +
-  
-  ## zero reference
   geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.6) +
-  
-  ## 95 % CIs with end-caps
   geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
                  height = 0, linewidth = 0.9) +
-  
-  ## point estimates
   geom_point(size = 3) +
-  
-  ## colour palette
-  scale_colour_manual(values = c("indirect social network exposure" = "red",
-                                 "robust indirect social network exposure" = "blue"),
-                      guide = "none") +
+  scale_colour_manual(values = c(
+    "indirect social network exposure" = "red",
+    "indirect social network exposure (controls for Spatial Exposure)" = "blue"
+  ), guide = "none") +
+  scale_y_discrete(labels = c(
+    "indirect social network exposure" = "indirect social network exposure",
+    "indirect social network exposure (controls for Spatial Exposure)" =
+      "indirect social network exposure\n(controls for Spatial Exposure)"
+  ))  +
   
   ## axis labels
   labs(x = "Change in focal-county age-adjusted suicide mortality (per 100,000)\nfor a 1-SD increase in ERPO social exposure", y = NULL) +
@@ -1310,15 +1647,16 @@ stargazer(
     "ERPO",                       # from did_no_spill
     "ERPO Social Exposure", # ERPO_exposure in did_spill_social
     "ERPO Spatial Exposure",
-    "Population Density",
-    "Percent Black",
+    "Population density",
     "Percent Asian",
+    "Percent Black",
     "Percent Other",
     "Percent Hispanic",
-    "Median Household Income",
-    "Percent of population who do not speak English that well",
-    "Percent unemployed ",
-    "Percent with less than high school education"
+    "Median household income ",
+    "Percent with limited English proficiency",
+    "Percent unemployed",
+    "Percent with less than high school education",
+    "Political Affiliation"
   )
   ,
   keep.stat = c("n", "rsq", "adj.rsq", "f"),
@@ -1654,4 +1992,4 @@ ggplot(coef_df, aes(x = rel_year, y = estimate)) +
 # Keep character GEOID for joins; create a separate integer id for did::att_gt
 panel[, id_int := as.integer(factor(GEOID))]
 
-
+### r
