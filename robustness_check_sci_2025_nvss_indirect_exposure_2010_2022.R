@@ -1587,8 +1587,10 @@ ggplot(ci_df,
                                  "socio-spatial" = "blue"),
                       guide = "none") +
   ## y-axis tick labels -> 'With' (socio-spatial) and 'Without' (social)
-  scale_y_discrete(labels = c("socio-spatial" = "Model 2",
-                              "social"         = "Model 1")) +
+  scale_y_discrete(labels = c(
+    "socio-spatial" = "Model 2R (SCI 2025)",
+    "social"        = "Model 1R (SCI 2025)"
+  )) +
   ## axis labels
   labs(
     x = "Change in focal-county suicide mortality (per 100,000)\nfor a one-SD increase in socially proximal counties suicide rate",
