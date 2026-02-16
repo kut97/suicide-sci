@@ -1291,7 +1291,7 @@ ggplot(ci_df,
     "indirect social network exposure (controls for Spatial Exposure)" =
       "indirect social network exposure\n(controls for Spatial Exposure)"
   )) +
-  labs(x = "Change in focal-county suicide mortality (per 100,000)\nfor a 1-SD increase in ERPO social exposure",
+  labs(x = "Change in focal-county suicide mortality (per 100,000)\nfor a one-SD increase in ERPO social exposure",
        y = NULL) +
   theme_classic(base_size = 12) +
   theme(panel.grid.major.y = element_line(colour = "grey85"),
@@ -1587,7 +1587,7 @@ ggplot(ci_df,
                               "social"         = "Model 1")) +
   ## axis labels
   labs(
-    x = "Change in focal-county suicide mortality (per 100,000)\nfor a 1-SD increase in socially proximal counties suicide rate",
+    x = "Change in focal-county suicide mortality (per 100,000)\nfor a one-SD increase in socially proximal counties suicide rate",
     y = NULL
   ) +
   ## larger fonts (x-ticks and x-label)
@@ -1864,7 +1864,7 @@ ggplot(ci_df,
   scale_colour_manual(values = c("socio-spatial" = "blue"),
                       guide = "none") +
   # y-axis tick labels
-  scale_y_discrete(labels = c("socio-spatial" = "indirect social network exposure\n(controls for Spatial Exposure and s_(-it))")) +
+  scale_y_discrete(labels = c("socio-spatial" = "indirect social network exposure\n(controls for spatial exposure &\ndeath rates in social proximity)")) +
   # axis labels
   labs(
     x = "Change in focal-county suicide mortality (per 100,000)\nfor a 1-SD increase in socially proximal counties suicide rate",
