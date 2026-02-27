@@ -1588,8 +1588,8 @@ ggplot(ci_df,
                       guide = "none") +
   ## y-axis tick labels -> 'With' (socio-spatial) and 'Without' (social)
   scale_y_discrete(labels = c(
-    "socio-spatial" = "Model 2R (SCI 2025)",
-    "social"        = "Model 1R (SCI 2025)"
+    "socio-spatial" = "Model 2R (SCI 2026)",
+    "social"        = "Model 1R (SCI 2026)"
   )) +
   ## axis labels
   labs(
