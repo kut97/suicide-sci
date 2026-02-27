@@ -1624,7 +1624,7 @@ ggplot(ci_df,
   ))  +
   
   ## axis labels
-  labs(x = "Change in focal-county age-adjusted suicide mortality (per 100,000)\nfor a 1-SD increase in ERPO social exposure", y = NULL) +
+  labs(x = "Change in focal-county age-adjusted suicide mortality (per 100,000)\nfor a one-SD increase in ERPO social exposure", y = NULL) +
   
   ## styling
   theme_classic(base_size = 12) +
@@ -1811,7 +1811,7 @@ ggplot(ci_df,
                               "social"         = "Model 1")) +
   ## axis labels
   labs(
-    x = "Change in focal-county age-adjusted suicide mortality (per 100,000)\nfor a 1-SD increase in socially proximal counties suicide rate",
+    x = "Change in focal-county age-adjusted suicide mortality (per 100,000)\nfor a one-SD increase in socially proximal counties suicide rate",
     y = NULL
   ) +
   ## larger fonts (x-ticks and x-label)
@@ -1860,6 +1860,154 @@ stargazer(
   column.sep.width = "1pt",
   out = "sensitivity_socio_spatial_table.tex"
 )
+
+
+## robustness check with age_adjusted mortality including social proximity ####
+
+did_spill_social_spatial_robustness_age_adjusted <- felm(
+  age_adjusted_rate_per_100k~  ERPO_exposure +  InvDist_exposure + s_minus_i_z + population_density +
+    prop_black + prop_asian + prop_other + prop_hispanic +     
+    ACS_MEDIAN_HH_INC + 
+    ACS_PCT_ENGL_NOT_WELL + 
+    ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS + political_affiliation
+  | GEOID + state_year | 0 |state ,
+  data = my_data_with_spatial_g,
+  weights = my_data_with_spatial_g$ACS_TOT_POP_WT
+)
+
+summary(did_spill_social_spatial_robustness_age_adjusted)
+
+
+### reading without age_adjusted_mortality file ####
+
+df_suicide_mortality_2010_2022 <- read_csv(
+  "without_age_adjusted_mortality_nvss_2010_2022.csv",
+  col_types = cols(GEOID = col_character())
+)
+
+df_suicide_mortality_2010_2022 <- df_suicide_mortality_2010_2022[,-1]
+
+
+did_spill_social_spatial_robustness <- felm(
+  death_rates_per_100_k ~ ERPO_exposure +  InvDist_exposure+  s_minus_i_z +
+    population_density +ACS_PCT_AGE_U18+ ACS_PCT_AGE_18_44 
+  + ACS_PCT_AGE_45_64+ prop_asian +
+    prop_black +  prop_other + prop_hispanic +     
+    ACS_MEDIAN_HH_INC + 
+    ACS_PCT_ENGL_NOT_WELL + 
+    ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS + political_affiliation
+  | GEOID + state_year | 0 |state ,
+  data = df_suicide_mortality_2010_2022,
+  weights = df_suicide_mortality_2010_2022$ACS_TOT_POP_WT
+)
+
+summary(did_spill_social_spatial_robustness)
+
+
+### creating confidence interval plot ###
+ci_df_robust <-
+  bind_rows(
+    tidy(did_spill_social_spatial_robustness_age_adjusted, conf.int = TRUE) |>
+      mutate(spec = "age-adjusted"),
+    tidy(did_spill_social_spatial_robustness, conf.int = TRUE) |>
+      mutate(spec = "without age-adjustment")
+  ) |>
+  filter(term == "ERPO_exposure") |>
+  mutate(
+    spec = factor(spec,
+                  levels = c("age-adjusted", "without age-adjustment"))
+  )
+
+ggplot(ci_df_robust,
+       aes(x = estimate,
+           y = spec,
+           colour = spec)) +
+  geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.6) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
+                 height = 0, linewidth = 0.9) +
+  geom_point(size = 3) +
+  scale_colour_manual(values = c("age-adjusted" = "blue",
+                                 "without age-adjustment" = "red"),
+                      guide = "none") +
+  labs(
+    x = "Change in suicide mortality (per 100,000)\nfor a one-SD increase in ERPO social exposure",
+    y = NULL
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.text.x  = element_text(size = 13),
+    axis.title.x = element_text(size = 13),
+    axis.text.y  = element_text(size = 13)
+)
+
+### stargrazer table #####
+
+stargazer(
+  did_spill_social_spatial_robustness,
+  type = "latex",
+  title = "Effect of Policy Exposure on Death Rates",
+  column.labels = "Robustness Check controlling for $s_{-it}$",
+  dep.var.labels = "Deaths per 100K",
+  covariate.labels = c(
+    "ERPO Social Exposure", # ERPO_exposure in did_spill_social
+    "ERPO Spatial Exposure",
+    "Deaths in social proximity $s_{-it}$", 
+    "Population density",
+    "Percent aged below 18",
+    "Percent aged 18-44", 
+    "Percent aged 45-64",
+    "Percent Asian",
+    "Percent Black",
+    "Percent Other",
+    "Percent Hispanic",
+    "Median household income ",
+    "Percent with limited English proficiency",
+    "Percent unemployed",
+    "Percent with less than high school education",
+    "Political Affiliation"  # Removed the trailing comma here
+  ),  # Also removed the trailing comma after the closing parenthesis
+  keep.stat = c("n", "rsq", "adj.rsq", "f"),
+  no.space = TRUE,
+  omit.stat = "ser",
+  omit.table.layout = "n",
+  column.sep.width = "1pt",
+  out = "output_table.tex"  # Save the output directly to a .tex file
+)
+
+stargazer(
+  did_spill_social_spatial_robustness_age_adjusted,
+  type = "latex",
+  title = "Effect of Policy Exposure on Death Rates",
+  column.labels = "Robustness Check controlling for $s_{-it}$",
+  dep.var.labels = "Deaths per 100K",
+  covariate.labels = c(                   # from did_no_spill
+    "ERPO Social Exposure", # ERPO_exposure in did_spill_social
+    "ERPO Spatial Exposure",
+    "Deaths in social proximity $\\tilde{s}_{-it}$",
+    "Population density",
+    "Percent Asian",
+    "Percent Black",
+    "Percent Other",
+    "Percent Hispanic",
+    "Median household income ",
+    "Percent with limited English proficiency",
+    "Percent unemployed",
+    "Percent with less than high school education",
+    "Political Affiliation"
+  )
+  ,
+  keep.stat = c("n", "rsq", "adj.rsq", "f"),
+  no.space = TRUE,
+  omit.stat = "ser",
+  omit.table.layout = "n",
+  column.sep.width = "1pt",
+  out = "output_table.tex"  # Save the output directly to a .tex file
+)
+
+
+
+
+
 
 ### event study code ####
 # 1) Inputs (from your workspace)
@@ -1992,4 +2140,4 @@ ggplot(coef_df, aes(x = rel_year, y = estimate)) +
 # Keep character GEOID for joins; create a separate integer id for did::att_gt
 panel[, id_int := as.integer(factor(GEOID))]
 
-### r
+
