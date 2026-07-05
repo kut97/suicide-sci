@@ -994,6 +994,146 @@ missing_summary <- aar_clean %>%
 
 ### to calculate exposure ###
 my_data_with_spatial_g <- aar_clean
+
+# ============================================================================
+#  R3.3 ADDITIONAL CONFOUNDERS  (added to the existing pipeline)
+#  COVID-19, drug overdose (substance-use proxy; residence-based via build_geoid,
+#  EXCLUDES X60-X64), County Health Rankings mental-health measures + EXCESSIVE
+#  DRINKING (alcohol proxy, CHR v049), and RAND state firearm policies.
+#  Continuous measures are z-scored; firearm flags stay 0/1.
+#  Denominator for per-100k = population_total (the rates' own denominator).
+# ============================================================================
+zstd_narm <- function(x) (x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE)
+
+CHR_DIR   <- "C:/Users/kusha/Desktop/Suide Ideation Data Request Form/suicide-ideation-social-networks/chr_csvs"
+RAND_XLSX <- "C:/Users/kusha/Desktop/Suide Ideation Data Request Form/suicide-ideation-social-networks/RAND_DATA/TL-A243-2-v4 State Firearm Law Database 6.0.xlsx"
+
+pop_lookup <- my_data_with_spatial_g %>%
+  transmute(GEOID = sprintf("%05d", as.integer(GEOID)), year = as.integer(year),
+            pop = population_total) %>% distinct()
+scaffold_conf <- expand.grid(GEOID = unique(pop_lookup$GEOID), year = 2010:2022,
+                             stringsAsFactors = FALSE) %>% as_tibble()
+
+## (a) COVID-19 deaths per 100k (NYT; 0 in 2010-2019) ------------------------
+covid_summary <- readr::read_csv(
+  "https://raw.githubusercontent.com/nytimes/covid-19-data/master/us-counties.csv",
+  show_col_types = FALSE) %>%
+  filter(!is.na(fips)) %>%
+  mutate(GEOID = sprintf("%05d", as.integer(fips)), year = lubridate::year(date)) %>%
+  group_by(GEOID, year) %>% summarise(covid_deaths_cum = max(deaths, na.rm = TRUE), .groups = "drop")
+covid_full <- scaffold_conf %>%
+  left_join(covid_summary, by = c("GEOID","year")) %>%
+  mutate(covid_deaths_cum = replace_na(covid_deaths_cum, 0)) %>%
+  left_join(pop_lookup, by = c("GEOID","year")) %>%
+  mutate(covid_deaths_per_100k = if_else(!is.na(pop) & pop > 0, covid_deaths_cum / pop * 1e5, 0)) %>%
+  select(GEOID, year, covid_deaths_per_100k)
+
+## (b) Drug-overdose deaths per 100k -- RESIDENCE-based, EXCLUDES X60-X64 -----
+overdose_codes <- c(sprintf("X%02d", 40:44), "X85", sprintf("Y%02d", 10:14))
+overdose_summary <- bind_rows(lapply(mort_list, function(mort_df) {
+  core <- mort_df %>% filter(ucod.icd.10 %in% overdose_codes) %>%
+    transmute(year     = suppressWarnings(as.integer(data.year)),
+              st_abbr  = as.character(state.residence),
+              cnty_raw = as.character(county.residence))
+  geo <- build_geoid(core$st_abbr, core$cnty_raw)
+  bind_cols(core, geo) %>% filter(is.na(geoid_issue)) %>%
+    group_by(year, GEOID) %>% summarise(overdose_deaths = n(), .groups = "drop")
+}))
+overdose_full <- scaffold_conf %>%
+  left_join(overdose_summary, by = c("GEOID","year")) %>%
+  mutate(overdose_deaths = replace_na(overdose_deaths, 0L)) %>%
+  left_join(pop_lookup, by = c("GEOID","year")) %>%
+  mutate(overdose_deaths_per_100k = if_else(!is.na(pop) & pop > 0, overdose_deaths / pop * 1e5, 0)) %>%
+  select(GEOID, year, overdose_deaths_per_100k)
+
+## (c) County Health Rankings: mental-health measures + EXCESSIVE DRINKING ---
+dir.create(CHR_DIR, showWarnings = FALSE, recursive = TRUE)
+mh_patterns <- c(poor_mental_health_days  = "^v042_rawvalue$|poor.*mental.*health.*day|mentally.*unhealthy",
+                 mental_health_providers  = "^v062_rawvalue$|mental.*health.*provider",
+                 frequent_mental_distress = "^v145_rawvalue$|frequent.*mental.*distress",
+                 excessive_drinking       = "^v049_rawvalue$|excessive.*drink")
+.b1 <- "https://www.countyhealthrankings.org/sites/default/files/"
+.b2 <- "https://www.countyhealthrankings.org/sites/default/files/media/document/"
+chr_urls <- c("2010"=paste0(.b1,"analytic_data2010.csv"),"2011"=paste0(.b1,"analytic_data2011.csv"),
+              "2012"=paste0(.b1,"analytic_data2012.csv"),"2013"=paste0(.b1,"analytic_data2013.csv"),
+              "2014"=paste0(.b1,"analytic_data2014.csv"),"2015"=paste0(.b1,"analytic_data2015.csv"),
+              "2016"=paste0(.b1,"analytic_data2016.csv"),"2017"=paste0(.b1,"analytic_data2017.csv"),
+              "2018"=paste0(.b1,"analytic_data2018_0.csv"),"2019"=paste0(.b2,"analytic_data2019.csv"),
+              "2020"=paste0(.b2,"analytic_data2020_0.csv"),"2021"=paste0(.b2,"analytic_data2021.csv"),
+              "2022"=paste0(.b2,"analytic_data2022.csv"))
+for (yr in names(chr_urls)) {
+  dest <- file.path(CHR_DIR, paste0("analytic_data", yr, ".csv"))
+  if (!file.exists(dest)) tryCatch(download.file(chr_urls[[yr]], dest, mode = "wb", quiet = TRUE),
+                                   error = function(e) message("CHR download failed ", yr, ": ", conditionMessage(e)))
+}
+read_chr_year <- function(f) {
+  yr <- as.integer(stringr::str_extract(basename(f), "\\d{4}"))
+  d  <- readr::read_csv(f, show_col_types = FALSE, col_types = cols(.default = "c")) %>% rename_with(tolower)
+  fips_col <- intersect(c("fipscode","fips","5-digit fips code"), names(d))[1]
+  if (is.na(fips_col) && all(c("statecode","countycode") %in% names(d))) {
+    d$.fips <- paste0(sprintf("%02d", as.integer(d$statecode)), sprintf("%03d", as.integer(d$countycode)))
+    fips_col <- ".fips"
+  }
+  if (is.na(fips_col)) return(NULL)
+  out <- tibble(GEOID = sprintf("%05d", as.integer(d[[fips_col]])), year = yr)
+  for (nm in names(mh_patterns)) {
+    col <- grep(mh_patterns[[nm]], names(d), value = TRUE)[1]
+    out[[nm]] <- if (!is.na(col)) suppressWarnings(as.numeric(d[[col]])) else NA_real_
+  }
+  out %>% filter(!grepl("NA", GEOID), substr(GEOID,3,5) != "000")
+}
+chr_panel <- map_dfr(list.files(CHR_DIR, pattern = "analytic_data\\d{4}\\.csv$", full.names = TRUE),
+                     read_chr_year) %>% distinct(GEOID, year, .keep_all = TRUE)
+
+## (d) RAND firearm policies (state x year; binary in-force flags) -----------
+if (file.exists(RAND_XLSX)) {
+  db <- read_excel(RAND_XLSX, sheet = "Database") %>%
+    transmute(state=`State Postal Abbreviation`, class=`Law Class`, subtype=`Law Class Subtype`,
+              guns=`Handguns or Long Guns`, effect=`Effect`, change=`Type of Change`,
+              eff_year=suppressWarnings(as.integer(`Effective Date Year`)),
+              age=suppressWarnings(as.integer(`Age for Minimum Age Laws`))) %>% filter(!is.na(eff_year))
+  ev <- db %>% filter(class %in% c("waiting period","child access laws","minimum age")) %>%
+    mutate(delta = case_when(change=="Implement" & effect=="Restrictive" ~ 1L,
+                             change=="Repeal" & effect=="Permissive" ~ -1L, TRUE ~ 0L)) %>%
+    group_by(state, class, year = eff_year) %>% summarise(delta = sum(delta), .groups = "drop")
+  in_force <- ev %>% distinct(state, class) %>% tidyr::crossing(year = min(ev$year):2022L) %>%
+    left_join(ev, by = c("state","class","year")) %>% mutate(delta = replace_na(delta, 0L)) %>%
+    arrange(state, class, year) %>% group_by(state, class) %>%
+    mutate(in_force = as.integer(cumsum(delta) > 0)) %>% ungroup() %>% filter(year %in% 2010:2022)
+  firearm_binary <- in_force %>%
+    mutate(key = recode(class, "waiting period"="fa_waiting_period","child access laws"="fa_cap","minimum age"="fa_min_age")) %>%
+    select(state, year, key, in_force) %>% pivot_wider(names_from = key, values_from = in_force, values_fill = 0)
+  first21 <- db %>% filter(class=="minimum age", effect=="Restrictive",
+                           grepl("purchase|sale", tolower(subtype)), grepl("handgun", tolower(guns)),
+                           !is.na(age), age >= 21) %>% group_by(state) %>% summarise(first21 = min(eff_year), .groups="drop")
+  firearm_min21 <- tidyr::crossing(state = unique(firearm_binary$state), year = 2010:2022L) %>%
+    left_join(first21, by = "state") %>% mutate(fa_min_age_21 = as.integer(!is.na(first21) & year >= first21)) %>%
+    select(state, year, fa_min_age_21)
+  firearm_policy <- firearm_binary %>% left_join(firearm_min21, by = c("state","year"))
+} else {
+  warning("RAND xlsx not found; firearm columns set to 0.")
+  firearm_policy <- tidyr::crossing(state = unique(my_data_with_spatial_g$state), year = 2010:2022L) %>%
+    mutate(fa_waiting_period = 0L, fa_cap = 0L, fa_min_age = 0L, fa_min_age_21 = 0L)
+}
+
+## (e) merge into the panel, bridge CHR gaps, standardize continuous ---------
+my_data_with_spatial_g <- my_data_with_spatial_g %>%
+  mutate(GEOID = sprintf("%05d", as.integer(GEOID)), year = as.integer(year)) %>%
+  left_join(covid_full,     by = c("GEOID","year")) %>%
+  left_join(overdose_full,  by = c("GEOID","year")) %>%
+  left_join(chr_panel,      by = c("GEOID","year")) %>%
+  left_join(firearm_policy, by = c("state","year")) %>%
+  mutate(covid_deaths_per_100k    = replace_na(covid_deaths_per_100k, 0),
+         overdose_deaths_per_100k = replace_na(overdose_deaths_per_100k, 0),
+         across(any_of(c("fa_waiting_period","fa_cap","fa_min_age","fa_min_age_21")), ~ replace_na(.x, 0L)))
+my_data_with_spatial_g <- my_data_with_spatial_g %>% arrange(GEOID, year) %>% group_by(GEOID) %>%
+  fill(any_of(names(mh_patterns)), .direction = "downup") %>% ungroup()
+.new_cont <- c("covid_deaths_per_100k","overdose_deaths_per_100k", names(mh_patterns))
+my_data_with_spatial_g[.new_cont] <- lapply(my_data_with_spatial_g[.new_cont], zstd_narm)
+my_data_with_spatial_g <- my_data_with_spatial_g %>%
+  mutate(across(any_of(names(mh_patterns)), ~ replace_na(.x, 0)))
+# ---- end R3.3 ADDITIONAL CONFOUNDERS ---------------------------------------
+
 ### calculating exposures ####
 ### red flag law social exposure ### 
 policy_data <- data.frame(
@@ -1537,6 +1677,9 @@ did_no_spill <- felm(
     ACS_MEDIAN_HH_INC + 
     ACS_PCT_ENGL_NOT_WELL + 
     ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS + political_affiliation
+  + covid_deaths_per_100k + overdose_deaths_per_100k
+  + poor_mental_health_days + mental_health_providers + frequent_mental_distress + excessive_drinking
+  + fa_waiting_period + fa_cap + fa_min_age_21
   | GEOID + year        # Fixed Effects
   | 0                    # No instrumental variables
   | state,               # Cluster by state
@@ -1554,6 +1697,8 @@ did_spill_spatial <- felm(
     ACS_MEDIAN_HH_INC + 
     ACS_PCT_ENGL_NOT_WELL + 
     ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS + political_affiliation
+  + covid_deaths_per_100k + overdose_deaths_per_100k
+  + poor_mental_health_days + mental_health_providers + frequent_mental_distress + excessive_drinking
   | GEOID + state_year | 0 | state, 
   data = my_data_with_spatial_g,
   weights = my_data_with_spatial_g$population_total
@@ -1569,6 +1714,8 @@ did_spill_social <- felm(
     ACS_MEDIAN_HH_INC + 
     ACS_PCT_ENGL_NOT_WELL + 
     ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS + political_affiliation
+  + covid_deaths_per_100k + overdose_deaths_per_100k
+  + poor_mental_health_days + mental_health_providers + frequent_mental_distress + excessive_drinking
   | GEOID + state_year | 0 | state, 
   data = my_data_with_spatial_g,
   weights = my_data_with_spatial_g$population_total
@@ -1584,6 +1731,8 @@ did_spill_social_spatial <- felm(
     ACS_MEDIAN_HH_INC + 
     ACS_PCT_ENGL_NOT_WELL + 
     ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS + political_affiliation
+  + covid_deaths_per_100k + overdose_deaths_per_100k
+  + poor_mental_health_days + mental_health_providers + frequent_mental_distress + excessive_drinking
   | GEOID + state_year | 0 |state ,
   data = my_data_with_spatial_g,
   weights = my_data_with_spatial_g$ACS_TOT_POP_WT
@@ -1656,7 +1805,16 @@ stargazer(
     "Percent with limited English proficiency",
     "Percent unemployed",
     "Percent with less than high school education",
-    "Political Affiliation"
+    "Political Affiliation",
+    "COVID-19 deaths per 100k",
+    "Drug-overdose deaths per 100k",
+    "Poor mental health days",
+    "Mental health providers",
+    "Frequent mental distress",
+    "Excessive drinking",
+    "Firearm: waiting period",
+    "Firearm: child-access prevention",
+    "Firearm: minimum purchase age 21"
   )
   ,
   keep.stat = c("n", "rsq", "adj.rsq", "f"),
@@ -1764,6 +1922,9 @@ proximity <- felm(
     ACS_MEDIAN_HH_INC + 
     ACS_PCT_ENGL_NOT_WELL + 
     ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS 
+  + covid_deaths_per_100k + overdose_deaths_per_100k
+  + poor_mental_health_days + mental_health_providers + frequent_mental_distress + excessive_drinking
+  + fa_waiting_period + fa_cap + fa_min_age_21
   | GEOID + year | 0 | state, 
   data = my_data_with_spatial_g,
   weights = my_data_with_spatial_g$population_total
@@ -1778,6 +1939,9 @@ socio_spatial_proximity <-  felm(
     ACS_MEDIAN_HH_INC + 
     ACS_PCT_ENGL_NOT_WELL + 
     ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS 
+  + covid_deaths_per_100k + overdose_deaths_per_100k
+  + poor_mental_health_days + mental_health_providers + frequent_mental_distress + excessive_drinking
+  + fa_waiting_period + fa_cap + fa_min_age_21
   | GEOID + year | 0 | state, 
   data = my_data_with_spatial_g,
   weights = my_data_with_spatial_g$population_total
@@ -1851,7 +2015,16 @@ stargazer(
     "Median Household Income",
     "Percent of population who do not speak English that well",
     "Percent unemployed",
-    "Percent with less than high school education"
+    "Percent with less than high school education",
+    "COVID-19 deaths per 100k",
+    "Drug-overdose deaths per 100k",
+    "Poor mental health days",
+    "Mental health providers",
+    "Frequent mental distress",
+    "Excessive drinking",
+    "Firearm: waiting period",
+    "Firearm: child-access prevention",
+    "Firearm: minimum purchase age 21"
   ),
   keep.stat = c("n", "rsq", "adj.rsq", "f"),
   no.space = TRUE,
@@ -1870,6 +2043,8 @@ did_spill_social_spatial_robustness_age_adjusted <- felm(
     ACS_MEDIAN_HH_INC + 
     ACS_PCT_ENGL_NOT_WELL + 
     ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS + political_affiliation
+  + covid_deaths_per_100k + overdose_deaths_per_100k
+  + poor_mental_health_days + mental_health_providers + frequent_mental_distress + excessive_drinking
   | GEOID + state_year | 0 |state ,
   data = my_data_with_spatial_g,
   weights = my_data_with_spatial_g$ACS_TOT_POP_WT
@@ -1881,11 +2056,26 @@ summary(did_spill_social_spatial_robustness_age_adjusted)
 ### reading without age_adjusted_mortality file ####
 
 df_suicide_mortality_2010_2022 <- read_csv(
-  "without_age_adjusted_mortality_nvss_2010_2022.csv",
+  "C:/Users/kusha/Desktop/Suide Ideation Data Request Form/suicide-ideation-social-networks/without_age_adjusted_mortality_nvss_2010_2022.csv",
   col_types = cols(GEOID = col_character())
 )
 
 df_suicide_mortality_2010_2022 <- df_suicide_mortality_2010_2022[,-1]
+
+# attach the same R3.3 confounders to the non-age-adjusted file (county x year);
+# firearm omitted -- this model is state_year-FE, which absorbs it.
+df_suicide_mortality_2010_2022 <- df_suicide_mortality_2010_2022 %>%
+  mutate(GEOID = sprintf("%05d", as.integer(GEOID)), year = as.integer(year)) %>%
+  left_join(covid_full,    by = c("GEOID","year")) %>%
+  left_join(overdose_full, by = c("GEOID","year")) %>%
+  left_join(chr_panel,     by = c("GEOID","year")) %>%
+  mutate(covid_deaths_per_100k    = replace_na(covid_deaths_per_100k, 0),
+         overdose_deaths_per_100k = replace_na(overdose_deaths_per_100k, 0)) %>%
+  arrange(GEOID, year) %>% group_by(GEOID) %>%
+  fill(any_of(names(mh_patterns)), .direction = "downup") %>% ungroup()
+df_suicide_mortality_2010_2022[.new_cont] <- lapply(df_suicide_mortality_2010_2022[.new_cont], zstd_narm)
+df_suicide_mortality_2010_2022 <- df_suicide_mortality_2010_2022 %>%
+  mutate(across(any_of(names(mh_patterns)), ~ replace_na(.x, 0)))
 
 
 did_spill_social_spatial_robustness <- felm(
@@ -1896,6 +2086,8 @@ did_spill_social_spatial_robustness <- felm(
     ACS_MEDIAN_HH_INC + 
     ACS_PCT_ENGL_NOT_WELL + 
     ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS + political_affiliation
+  + covid_deaths_per_100k + overdose_deaths_per_100k
+  + poor_mental_health_days + mental_health_providers + frequent_mental_distress + excessive_drinking
   | GEOID + state_year | 0 |state ,
   data = df_suicide_mortality_2010_2022,
   weights = df_suicide_mortality_2010_2022$ACS_TOT_POP_WT
@@ -1938,7 +2130,7 @@ ggplot(ci_df_robust,
     axis.text.x  = element_text(size = 13),
     axis.title.x = element_text(size = 13),
     axis.text.y  = element_text(size = 13)
-)
+  )
 
 ### stargrazer table #####
 
@@ -1964,8 +2156,14 @@ stargazer(
     "Percent with limited English proficiency",
     "Percent unemployed",
     "Percent with less than high school education",
-    "Political Affiliation"  # Removed the trailing comma here
-  ),  # Also removed the trailing comma after the closing parenthesis
+    "Political Affiliation",
+    "COVID-19 deaths per 100k",
+    "Drug-overdose deaths per 100k",
+    "Poor mental health days",
+    "Mental health providers",
+    "Frequent mental distress",
+    "Excessive drinking"
+  ),
   keep.stat = c("n", "rsq", "adj.rsq", "f"),
   no.space = TRUE,
   omit.stat = "ser",
@@ -1993,7 +2191,13 @@ stargazer(
     "Percent with limited English proficiency",
     "Percent unemployed",
     "Percent with less than high school education",
-    "Political Affiliation"
+    "Political Affiliation",
+    "COVID-19 deaths per 100k",
+    "Drug-overdose deaths per 100k",
+    "Poor mental health days",
+    "Mental health providers",
+    "Frequent mental distress",
+    "Excessive drinking"
   )
   ,
   keep.stat = c("n", "rsq", "adj.rsq", "f"),
@@ -2003,141 +2207,3 @@ stargazer(
   column.sep.width = "1pt",
   out = "output_table.tex"  # Save the output directly to a .tex file
 )
-
-
-
-
-
-
-### event study code ####
-# 1) Inputs (from your workspace)
-# =========================
-# my_data_with_spatial_g : county-year panel (data.frame/data.table)
-# w_i_state              : long weights: i_fips, j_state, w_is
-# policy_data            : state-level events: state, start_year (>0 = treated)
-
-# Convert to data.table
-panel  <- as.data.table(my_data_with_spatial_g)
-wstate <- as.data.table(w_i_state)
-
-# Standardize column names for the weights
-setnames(wstate, c("i_fips","j_state","w_is"), c("GEOID","event_state","exposure"))
-
-# Event list (only treated states with valid adoption years)
-events <- as.data.table(policy_data)[start_year > 0,
-                                     .(event_state = state, t0 = start_year)]
-
-# =========================
-# 2) Harmonize keys (fix type mismatch)
-# =========================
-# Keep GEOID as zero-padded character (width 5) everywhere
-panel[,  GEOID := str_pad(as.character(GEOID), 5, pad = "0")]
-wstate[, GEOID := str_pad(as.character(GEOID), 5, pad = "0")]
-
-# Ensure 'state' is character for clustering
-panel[, state := as.character(state)]
-
-# If a state_year FE string is not present, create it
-if (!"state_year" %in% names(panel)) {
-  panel[, state_year := paste0(state, "_", year)]
-}
-
-# =========================
-# 3) Design choices
-# =========================
-K_pre  <- 4  # leads: years before adoption kept in the stack
-K_post <- 2  # lags: years after adoption kept in the stack
-
-# =========================
-# 4) Build stacked event–study data
-# =========================
-keep_cols <- c(
-  "GEOID","year","state","age_adjusted_rate_per_100k","InvDist_exposure",
-  "population_density",
-  "prop_black","prop_asian","prop_other","prop_hispanic",
-  "ACS_MEDIAN_HH_INC","ACS_PCT_ENGL_NOT_WELL",
-  "ACS_PCT_UNEMPLOY","ACS_PCT_LT_HS",
-  "ACS_TOT_POP_WT","state_year"
-)
-
-stacked_es <- rbindlist(lapply(1:nrow(events), function(j) {
-  
-  st <- events$event_state[j]
-  t0 <- events$t0[j]
-  
-  # Copy minimal slice
-  tmp <- panel[, ..keep_cols]
-  
-  # Event label and relative year
-  tmp[, `:=`(event_id = st,
-             rel_year = year - t0)]
-  
-  # Keep window [-K_pre, K_post]
-  tmp <- tmp[rel_year >= -K_pre & rel_year <= K_post]
-  
-  # Left join time-invariant exposure w_i^(st) for this treated state
-  exp_st <- wstate[event_state == st, .(GEOID, exposure)]
-  tmp <- merge(tmp, exp_st, by = "GEOID", all.x = TRUE)
-  
-  # Counties with no social ties to st get exposure = 0
-  tmp[is.na(exposure), exposure := 0]
-  
-  tmp
-}), use.names = TRUE, fill = TRUE)
-
-# Global z-score of exposure in the stacked data
-stacked_es[, exposure := scale(exposure)[, 1]]
-
-# =========================
-# 5) Estimate Wilson-style specification
-# =========================
-# FE: county-by-event_id and state_year-by-event_id (as in your code)
-# Controls: as in your code
-fml <- age_adjusted_rate_per_100k ~
-  exposure:i(rel_year, ref = -1) + InvDist_exposure +
-  population_density  +
-  prop_black + prop_asian + prop_other + prop_hispanic +
-  ACS_MEDIAN_HH_INC + ACS_PCT_ENGL_NOT_WELL +
-  ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS | 
-  GEOID^event_id + state_year^event_id
-
-est_es <- feols(
-  fml,
-  data    = stacked_es,
-  weights = ~ ACS_TOT_POP_WT,
-  cluster = ~ state
-)
-
-# Quick diagnostic: count support by event time and exposure>0
-print(table(stacked_es$rel_year, stacked_es$exposure > 0))
-
-# =========================
-# 6) Coefficient table for plotting
-# =========================
-coef_df <- broom::tidy(est_es)[
-  grepl("^exposure:rel_year", broom::tidy(est_es)$term),
-] 
-coef_df$rel_year <- as.integer(stringr::str_extract(coef_df$term, "-?\\d+"))
-coef_df <- coef_df[order(coef_df$rel_year), ]
-
-# =========================
-# 7) Event-study plot
-# =========================
-ggplot(coef_df, aes(x = rel_year, y = estimate)) +
-  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.25) +
-  geom_vline(xintercept = 0, linetype = "dotted", linewidth = 0.25) +
-  geom_line(linewidth = 0.5) +
-  geom_pointrange(aes(ymin = estimate - 1.96 * std.error,
-                      ymax = estimate + 1.96 * std.error),
-                  size = 0.4) +
-  labs(x = "Years relative to ERPO adoption",
-       y = "Coefficient estimate (per 100,000)") +
-  theme_minimal(base_size = 10)
-
-# =========================
-# 8) (Optional) DID 'did' package block without breaking FIPS
-# =========================
-# Keep character GEOID for joins; create a separate integer id for did::att_gt
-panel[, id_int := as.integer(factor(GEOID))]
-
-
