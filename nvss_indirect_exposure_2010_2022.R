@@ -155,7 +155,7 @@ mort_2022 <- read_us_mortality_data("C:/Users/kusha/Desktop/Suide Ideation Data 
 # 1. Define suicide ICD-10 codes
 suicide_codes <- c(sprintf("X%02d", 60:84), "Y87.0")
 
-# 2. Build state lookup: postal abbreviations ??? 2-digit FIPS
+# 2. Build state lookup: postal abbreviations -> 2-digit FIPS
 abbs <- c(state.abb, "DC")
 fips_codes <- c(
   "01","02","04","05","06","08","09","10","12","13","15","19","16",
@@ -173,22 +173,18 @@ state_codes <- tibble(
 summarise_suicides <- function(mort_df) {
   mort_df %>%
     filter(ucod.icd.10 %in% suicide_codes) %>%
-    # county.occurrence is a 3-digit string or integer ??? pad to 3 chars
     mutate(
       county_fips = sprintf("%03d", as.integer(county.occurrence)),
       year        = data.year,
-      state_abbr  = state.occurrence   # already "PA", "NY", etc.
+      state_abbr  = state.occurrence
     ) %>%
     group_by(year, state_abbr, county_fips) %>%
     summarise(total_deaths = n(), .groups = "drop") %>%
-    # bring in the 2-digit state FIPS
     left_join(state_codes, by = "state_abbr") %>%
-    # assemble the 5-digit GEOID
     mutate(GEOID = paste0(state_fips, county_fips)) %>%
     select(year, state = state_abbr, state_fips, county_fips, GEOID, total_deaths)
 }
 
-# 2. Collect all annual data-frames into a named list:
 mort_list <- list(
   `2010` = mort_2010,
   `2011` = mort_2011,
@@ -205,23 +201,15 @@ mort_list <- list(
   `2022` = mort_2022
 )
 
-# 3. Summarise suicides in each year and combine
 suicide_panel_all <- bind_rows(
   lapply(mort_list, summarise_suicides),
   .id = "year_list"
 ) %>%
-  # ensure 'year_list' and 'year' agree
   mutate(year = as.integer(year)) %>%
   select(year, state, state_fips, county_fips, GEOID, total_deaths) %>%
   arrange(year, GEOID)
 
-## missing geoids imputing them with zero ###
-# Assume `suicide_panel_all` exists with columns:
-# year (integer), state (abbr), state_fips (2-digit string), county_fips (3-digit string), GEOID, total_deaths
-
-# Function to identify missing GEOIDs for a given year
 check_missing_geoids <- function(year_of_interest, panel_df) {
-  # 1. Fetch ACS county GEOIDs for total population in that year
   acs_county <- get_acs(
     geography = "county",
     variables = "B01003_001",
@@ -230,15 +218,13 @@ check_missing_geoids <- function(year_of_interest, panel_df) {
     geometry  = FALSE,
     cache_table = TRUE
   ) %>%
-    select(GEOID)  # keep only GEOID for matching
+    select(GEOID)
   
-  # 2. Subset panel to that year
   panel_sub <- panel_df %>%
     filter(year == year_of_interest) %>%
     select(GEOID, state_fips, county_fips, state) %>%
     distinct()
   
-  # 3. Identify GEOIDs in panel not in ACS
   missing <- panel_sub %>%
     anti_join(acs_county, by = "GEOID") %>%
     mutate(year = year_of_interest) %>%
@@ -247,31 +233,19 @@ check_missing_geoids <- function(year_of_interest, panel_df) {
   return(missing)
 }
 
-# Vector of years 2010 through 2022
 years <- 2010:2022
-
-# Loop over years, combine results
 missing_all_years <- map_dfr(years, ~ check_missing_geoids(.x, suicide_panel_all))
-
-# Inspect missing GEOIDs across all years
 missing_all_years
 
-# 2. Ensure GEOID in cdc_Wonder_data is character
 cdc_Wonder_data <- read.csv(
   "C:/Users/kusha/Desktop/Suide Ideation Data Request Form/suicide-ideation-social-networks/cdc_wonder.csv",
   colClasses = c(GEOID = "character"),
   stringsAsFactors = FALSE
 )
-# Optionally verify:
-# str(cdc_Wonder_data$GEOID)
 
-# 3. Build reference GEOID sets
-# If cdc_Wonder_data has a year column, use per-year sets; else use full unique set for all years.
 has_year_col <- "year" %in% colnames(cdc_Wonder_data)
 
-# Precompute reference lists:
 if (has_year_col) {
-  # assume year column is integer or numeric
   ref_geoids_by_year <- cdc_Wonder_data %>%
     mutate(year = as.integer(year)) %>%
     filter(!is.na(GEOID)) %>%
@@ -281,24 +255,17 @@ if (has_year_col) {
   ref_geoids_all <- unique(cdc_Wonder_data$GEOID)
 }
 
-# 4. Prepare suicide counts panel (as before)
 suicide_panel_all <- bind_rows(
   lapply(mort_list, summarise_suicides),
   .id = "year_list"
 ) %>%
-  # ensure 'year_list' and 'year' agree
   mutate(year = as.integer(year)) %>%
   select(year, state, state_fips, county_fips, GEOID, total_deaths) %>%
   arrange(year, GEOID)
 
-# 5. Build complete panel using CDC WONDER reference
 years <- 2010:2022
 
-# After constructing ref_geoids_by_year when has_year_col == TRUE:
-# ref_geoids_by_year is a tibble with columns year and list column ref_geoids.
-
 complete_suicide_panel_ref <- map_dfr(years, function(y) {
-  # Determine reference GEOIDs for year y
   if (has_year_col) {
     entry <- ref_geoids_by_year %>%
       filter(year == y) %>%
@@ -306,7 +273,6 @@ complete_suicide_panel_ref <- map_dfr(years, function(y) {
     if (length(entry) == 1) {
       geoids_ref <- entry[[1]]
     } else {
-      # Fallback: if no CDC WONDER GEOIDs for this year, use empty vector
       geoids_ref <- character(0)
       warning(sprintf("No reference GEOIDs found for year %d; using empty set.", y))
     }
@@ -314,7 +280,6 @@ complete_suicide_panel_ref <- map_dfr(years, function(y) {
     geoids_ref <- ref_geoids_all
   }
   
-  # Construct reference tibble
   ref_df <- tibble(GEOID = geoids_ref) %>%
     mutate(
       year = y,
@@ -324,32 +289,27 @@ complete_suicide_panel_ref <- map_dfr(years, function(y) {
     left_join(state_codes, by = "state_fips") %>%
     rename(state = state_abbr)
   
-  # Extract observed suicide counts for year y
   obs_df <- suicide_panel_all %>%
     filter(year == y) %>%
     select(GEOID, total_deaths)
   
-  # Left join and impute missing total_deaths = 0
   ref_df %>%
     left_join(obs_df, by = "GEOID") %>%
     mutate(total_deaths = replace_na(total_deaths, 0)) %>%
     select(year, state, state_fips, county_fips, GEOID, total_deaths)
 })
 
-# Exclude if needed
 exclude_geoids <- c("02158", "02261", "46102", "15005")
 complete_suicide_panel_ref <- complete_suicide_panel_ref %>%
   filter(!GEOID %in% exclude_geoids)
 
-# Verify
 complete_suicide_panel_ref %>%
   group_by(year) %>%
   summarise(n_counties = n()) %>%
   print()
-# 0. Reference GEOIDs from CDC WONDER (2010-2020)
+
 ref_geoids_all <- unique(cdc_Wonder_data$GEOID)
 
-# --- 1. Build and bind 2021 & 2022 panels using ref_geoids_all ---
 additional_years <- c(2021L, 2022L)
 
 additional_panel <- map_dfr(additional_years, function(y) {
@@ -370,14 +330,12 @@ additional_panel <- map_dfr(additional_years, function(y) {
     select(year, state, state_fips, county_fips, GEOID, total_deaths)
 })
 
-# --- 2. Combine and re-exclude if needed ---
 complete_suicide_panel_ref <- bind_rows(
   complete_suicide_panel_ref,
   additional_panel
 ) %>%
   filter(!GEOID %in% exclude_geoids)
 
-# --- 3. Verify full 2010-2022 panel ---
 complete_suicide_panel_ref %>%
   group_by(year) %>%
   summarise(n_counties = n(), .groups = "drop") %>%
@@ -385,25 +343,20 @@ complete_suicide_panel_ref %>%
 
 ### covariates ###
 
-# Define the data path
 data_path <- "C:/Users/kusha/Desktop/Suide Ideation Data Request Form/suicide-ideation-social-networks/SDOH_Covariates/sdoh_csvs"
 
-# 1) Enumerate yearly SDOH files
 files <- list.files(
   path = data_path,
-  pattern = "^sdoh_\\d{4}\\.csv$",          # sdoh_2010.csv, sdoh_2011.csv, ...
+  pattern = "^sdoh_\\d{4}\\.csv$",
   full.names = TRUE
 )
 
-# 2) Loop over files, construct race & ethnicity proportions
 for (f in files) {
   
   year <- sub(".*sdoh_(\\d{4}).*", "\\1", basename(f))
   
-  # Read as data frame with COUNTYFIPS preserved as character
   tmp <- read.csv(f, colClasses = c(COUNTYFIPS = "character"))
   
-  # ---- Create proportion (0–1) covariates ----------------------------------
   tmp$prop_black     <- tmp$ACS_PCT_BLACK          / 100
   tmp$prop_asian     <- tmp$ACS_PCT_ASIAN_NONHISP  / 100
   tmp$prop_other     <- (tmp$ACS_PCT_AIAN_NONHISP +
@@ -411,25 +364,18 @@ for (f in files) {
                            tmp$ACS_PCT_MULT_RACE_NONHISP) / 100
   tmp$prop_hispanic  <- tmp$ACS_PCT_HISPANIC       / 100
   
-  # ---- NEW: age composition ----
   u18_vars <- c("ACS_PCT_AGE_0_4","ACS_PCT_AGE_5_9","ACS_PCT_AGE_10_14","ACS_PCT_AGE_15_17")
-  # Require all four components; if any missing, result is NA (na.rm = FALSE)
   tmp$ACS_PCT_AGE_U18    <- rowSums(tmp[, u18_vars, drop = FALSE], na.rm = FALSE)
-  # Optional quality check: ensure shares do not exceed 1
   tmp$share_check <- tmp$prop_black + tmp$prop_asian + tmp$prop_other +
-    (1 - tmp$prop_hispanic)  # adds White_NH implicitly
+    (1 - tmp$prop_hispanic)
   if (any(tmp$share_check > 1.001, na.rm = TRUE)) {
     warning(sprintf("Share constraint violated in %s (year %s)", f, year))
   }
   tmp$share_check <- NULL
   
-  # 3) Store processed data frame in the workspace
   assign(paste0("df_", year), tmp)
 }
 
-
-
-# 2) Combine into a single panel dataset
 years <- sub(".*sdoh_(\\d{4}).*", "\\1", basename(files))
 
 my_panel <- do.call(
@@ -459,22 +405,17 @@ my_panel <- do.call(
   })
 )
 
-# Confirm COUNTYFIPS is character
 str(my_panel$COUNTYFIPS)
 
-### getting the GEOIDS excisting in the data set ###
-
-# 3) Filter to contiguous US counties
 my_panel <- my_panel %>% 
   filter(COUNTYFIPS %in% complete_suicide_panel_ref$GEOID)
 
-### merging the data ###
 suicide_mortality <- complete_suicide_panel_ref %>%
   left_join(
     my_panel,
     by = c( "GEOID"="COUNTYFIPS" , "year"= "YEAR")
   )
-# Variable mapping (example; adjust if you have different definitions)
+
 get_sdoh_acs <- function(year){
   
   core <- c(
@@ -494,20 +435,15 @@ get_sdoh_acs <- function(year){
     hh_total  = "C16002_001"
   )
   
-  # ---- Correct age bucket indices from B01001 (male 3:25, female 27:49) ----
-  # <18  : male 3:6,    female 27:30
   u18_codes      <- c(sprintf("B01001_%03d",  3: 6),
                       sprintf("B01001_%03d", 27:30))
   
-  # 18–44: male 7:14,   female 31:38
   age18_44_codes <- c(sprintf("B01001_%03d",  7:14),
                       sprintf("B01001_%03d", 31:38))
   
-  # 45–64: male 15:19,  female 39:43
   age45_64_codes <- c(sprintf("B01001_%03d", 15:19),
                       sprintf("B01001_%03d", 39:43))
   
-  # 65+  : male 20:25,  female 44:49
   age65p_codes   <- c(sprintf("B01001_%03d", 20:25),
                       sprintf("B01001_%03d", 44:49))
   
@@ -528,10 +464,8 @@ get_sdoh_acs <- function(year){
     cache_table = TRUE
   )
   
-  # Keep estimates; strip trailing “E” from estimate cols only
   acs <- acs %>% dplyr::rename_with(~ sub("E$", "", .x), dplyr::ends_with("E"))
   
-  # Safe row sums
   u18    <- acs %>% dplyr::select(dplyr::all_of(u18_codes))       %>% as.matrix() %>% rowSums(na.rm = TRUE)
   a18_44 <- acs %>% dplyr::select(dplyr::all_of(age18_44_codes))  %>% as.matrix() %>% rowSums(na.rm = TRUE)
   a45_64 <- acs %>% dplyr::select(dplyr::all_of(age45_64_codes))  %>% as.matrix() %>% rowSums(na.rm = TRUE)
@@ -548,7 +482,6 @@ get_sdoh_acs <- function(year){
     ACS_MEDIAN_HH_INC     = med_inc,
     ACS_PCT_UNEMPLOY      = 100 * unem   / labor,
     ACS_PCT_LT_HS         = 100 * lt_hs  / tot_edu,
-    # Age composition (percent of total population)
     ACS_PCT_AGE_U18       = 100 * u18    / total_pop,
     ACS_PCT_AGE_18_44     = 100 * a18_44 / total_pop,
     ACS_PCT_AGE_45_64     = 100 * a45_64 / total_pop,
@@ -557,46 +490,30 @@ get_sdoh_acs <- function(year){
   )
 }
 
-### ACS SDOH ### COVARIATES ###
 acs21   <- get_sdoh_acs(2021)
 acs22   <- get_sdoh_acs(2022)
 
-# ------------------------------------------------------------------
-# 0  Define the set of covariate columns that arrive from ACS
-# ------------------------------------------------------------------
 acs_vars <- c("ACS_TOT_POP_WT","prop_black","prop_asian","prop_other",
               "prop_hispanic","ACS_MEDIAN_HH_INC","ACS_PCT_UNEMPLOY",
               "ACS_PCT_LT_HS","ACS_PCT_AGE_18_44","ACS_PCT_AGE_45_64","ACS_PCT_AGE_U18", "ACS_PCT_AGE_ABOVE65",
               "ACS_PCT_ENGL_NOT_WELL")
 
-# ------------------------------------------------------------------
-# 1  Restrict ACS 2021-2022 to counties that are already in the panel
-#    and harmonise key names ("GEOID", "year")
-# ------------------------------------------------------------------
-acs21_trim <- acs21 %>%                                     # from your workspace
-  rename(GEOID = COUNTYFIPS, year = YEAR) %>%               # 5-digit ??? panel key
-  semi_join(suicide_mortality, by = c("GEOID","year"))      # keep only matches
+acs21_trim <- acs21 %>%
+  rename(GEOID = COUNTYFIPS, year = YEAR) %>%
+  semi_join(suicide_mortality, by = c("GEOID","year"))
 
 acs22_trim <- acs22 %>% 
   rename(GEOID = COUNTYFIPS, year = YEAR) %>% 
   semi_join(suicide_mortality, by = c("GEOID","year"))
 
-acs_vars <- c("ACS_TOT_POP_WT","prop_black","prop_asian","prop_other",
-              "prop_hispanic","ACS_MEDIAN_HH_INC","ACS_PCT_UNEMPLOY",
-              "ACS_PCT_LT_HS","ACS_PCT_AGE_18_44","ACS_PCT_AGE_45_64","ACS_PCT_AGE_U18", "ACS_PCT_AGE_ABOVE65",
-              "ACS_PCT_ENGL_NOT_WELL")
-# 1. Pool 2021-2022 ACS data and align keys -------------------------------
-acs_new <- bind_rows(acs21_trim, acs22_trim)      # already GEOID-year keyed
+acs_new <- bind_rows(acs21_trim, acs22_trim)
 
-
-# 2. Inject 2021-22 covariates where available ----------------------------
 sm_step1 <- suicide_mortality |>
   left_join(acs_new, by = c("GEOID","year"), suffix = c("", ".acs")) |>
   mutate(across(all_of(acs_vars),
                 ~ coalesce(.x, get(paste0(cur_column(), ".acs"))))) |>
   select(-ends_with(".acs"))
 
-# 3. County-specific historical means (2015-2020) -------------------------
 county_means <- sm_step1 |>
   filter(year <= 2020) |>
   group_by(GEOID) |>
@@ -604,14 +521,12 @@ county_means <- sm_step1 |>
                    ~ mean(.x, na.rm = TRUE), .names = "{.col}_mu"),
             .groups = "drop")
 
-# 4. Impute still-missing entries with county means -----------------------
 sm_step2 <- sm_step1 |>
   left_join(county_means, by = "GEOID") |>
   mutate(across(all_of(acs_vars),
                 ~ coalesce(.x, get(paste0(cur_column(), "_mu"))))) |>
   select(-ends_with("_mu"))
 
-# 5. Optional: fill any residual NA with national means -------------------
 national_means <- sm_step2 |>
   summarise(across(all_of(acs_vars), ~ mean(.x, na.rm = TRUE)))
 
@@ -620,41 +535,32 @@ suicide_mortality <- sm_step2 |>
                 ~ coalesce(.x, national_means[[cur_column()]])))
 
 ### completing the data ###
-### adding latitude and longitude in the data ###
 counties <- counties(cb = TRUE, class = "sf")
 entire_american_fips_vector <- unique(suicide_mortality$GEOID)
-### filtering the east_american_fips_Vector from counties###
 selected_counties <- counties[counties$GEOID %in% entire_american_fips_vector, ]
 
-#### getting the centroids ###
 centroids <- st_centroid(selected_counties)
 centroids <- centroids[order(centroids$GEOID ),]
 coords <- st_coordinates(centroids)
-### ordering the counties by geoid ###
 selected_counties <- selected_counties[order(selected_counties$GEOID), ]
-### getting the lat lng ###
 geoid_lat_lng<- data.frame(
   GEOID = selected_counties$GEOID,
   Longitude = coords[,1],
   Latitude = coords[,2]
 )
-### adding lat and lng information to the county information ####
 suicide_mortality <- left_join(suicide_mortality,geoid_lat_lng, by=c("GEOID"))
 
 ### population density ####
 counties <- counties(year = 2018, cb = TRUE)
-# Calculate area in square kilometers
-counties <- st_transform(counties, crs = 5070)  # Transform to Albers Equal Area for accurate area calculation
+counties <- st_transform(counties, crs = 5070)
 counties <- counties %>%
-  mutate(area_sq_km = as.numeric(st_area(geometry)) / 1e6)  # Convert area to square kilometers
+  mutate(area_sq_km = as.numeric(st_area(geometry)) / 1e6)
 
 counties <- counties %>% filter(GEOID %in% suicide_mortality$GEOID) %>% select(c("GEOID", "area_sq_km"))
 suicide_mortality <- merge(suicide_mortality,counties,by="GEOID")
 suicide_mortality <- suicide_mortality %>% mutate(population_density=ACS_TOT_POP_WT/area_sq_km)
 
-
 ###  Deaths per 100 000 population
-# -------------------------------------------
 suicide_mortality <- suicide_mortality%>% 
   mutate(death_rates_per_100_k = if_else(
     ACS_TOT_POP_WT > 0,
@@ -664,18 +570,16 @@ suicide_mortality <- suicide_mortality%>%
 my_data_with_spatial_g <- suicide_mortality 
 
 
-
 # ============================================================================
-#  EDIT 1 -- PASTE THIS BLOCK right after the line
-#                my_data_with_spatial_g <- suicide_mortality
-#            i.e. immediately BEFORE the comment
-#                ### red flag law social exposure ###
+#  R3.3 ADDITIONAL CONFOUNDERS -- UPDATED
+#  Changes from the previous version:
+#   (a) COVID-19: fixed to true ANNUAL deaths (was cumulative-to-date)
+#   (c) CHR: simplified to poor_mental_health_days ONLY -- mental_health_
+#       providers, frequent_mental_distress, excessive_drinking removed
+#   (NEW) Alcohol-related deaths per 100k, computed directly from NVSS
 # ============================================================================
-
-# ---- R3.3 ADDITIONAL CONFOUNDERS -------------------------------------------
 zstd_narm <- function(x) (x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE)
 
-# paths (same locations you used before)
 CHR_DIR   <- "C:/Users/kusha/Desktop/Suide Ideation Data Request Form/suicide-ideation-social-networks/chr_csvs"
 RAND_XLSX <- "C:/Users/kusha/Desktop/Suide Ideation Data Request Form/suicide-ideation-social-networks/RAND_DATA/TL-A243-2-v4 State Firearm Law Database 6.0.xlsx"
 
@@ -686,18 +590,32 @@ pop_lookup <- my_data_with_spatial_g %>%
 scaffold_conf <- expand.grid(GEOID = unique(pop_lookup$GEOID), year = 2010:2022,
                              stringsAsFactors = FALSE) %>% as_tibble()
 
-## (a) COVID-19 deaths per 100k (NYT; 0 in 2010-2019) ------------------------
+## (a) COVID-19 deaths per 100k -- FIXED to true annual counts ---------------
+## NYT's own documentation confirms `deaths` is a cumulative running total,
+## not a period count. max() within (GEOID, year) therefore gives cumulative
+## deaths THROUGH that year, not deaths DURING that year. This differences
+## consecutive year-end cumulative values, per county, to get the true
+## annual count. pmax(...,0) guards against NYT's documented rare downward
+## revisions producing a negative difference.
 covid_summary <- readr::read_csv(
   "https://raw.githubusercontent.com/nytimes/covid-19-data/master/us-counties.csv",
   show_col_types = FALSE) %>%
   filter(!is.na(fips)) %>%
   mutate(GEOID = sprintf("%05d", as.integer(fips)), year = lubridate::year(date)) %>%
-  group_by(GEOID, year) %>% summarise(covid_deaths_cum = max(deaths, na.rm = TRUE), .groups = "drop")
+  group_by(GEOID, year) %>%
+  summarise(covid_deaths_cum_year_end = max(deaths, na.rm = TRUE), .groups = "drop") %>%
+  arrange(GEOID, year) %>%
+  group_by(GEOID) %>%
+  mutate(covid_deaths_annual = covid_deaths_cum_year_end - lag(covid_deaths_cum_year_end, default = 0),
+         covid_deaths_annual = pmax(covid_deaths_annual, 0)) %>%
+  ungroup() %>%
+  select(GEOID, year, covid_deaths_annual)
+
 covid_full <- scaffold_conf %>%
   left_join(covid_summary, by = c("GEOID","year")) %>%
-  mutate(covid_deaths_cum = replace_na(covid_deaths_cum, 0)) %>%
+  mutate(covid_deaths_annual = replace_na(covid_deaths_annual, 0)) %>%
   left_join(pop_lookup, by = c("GEOID","year")) %>%
-  mutate(covid_deaths_per_100k = if_else(ACS_TOT_POP_WT > 0, covid_deaths_cum / ACS_TOT_POP_WT * 1e5, 0)) %>%
+  mutate(covid_deaths_per_100k = if_else(ACS_TOT_POP_WT > 0, covid_deaths_annual / ACS_TOT_POP_WT * 1e5, 0)) %>%
   select(GEOID, year, covid_deaths_per_100k)
 
 ## (b) Drug-overdose deaths per 100k (EXCLUDES X60-X64 = your suicide outcome)-
@@ -717,14 +635,13 @@ overdose_full <- scaffold_conf %>%
   mutate(overdose_deaths_per_100k = if_else(ACS_TOT_POP_WT > 0, overdose_deaths / ACS_TOT_POP_WT * 1e5, 0)) %>%
   select(GEOID, year, overdose_deaths_per_100k)
 
-## (c) County Health Rankings: mental-health measures + EXCESSIVE DRINKING ---
-##     excessive drinking = CHR v049 (alcohol-availability proxy on the pathway
-##     alcohol control laws -> excessive drinking -> alcohol-related death)
+## (c) County Health Rankings -- poor_mental_health_days ONLY ----------------
+## mental_health_providers, frequent_mental_distress, and excessive_drinking
+## have been removed: too much missing/unstable data across 2010-2022 (see
+## prior diagnostics). poor_mental_health_days is the most complete of the
+## four and is retained.
 dir.create(CHR_DIR, showWarnings = FALSE, recursive = TRUE)
-mh_patterns <- c(poor_mental_health_days  = "^v042_rawvalue$|poor.*mental.*health.*day|mentally.*unhealthy",
-                 mental_health_providers  = "^v062_rawvalue$|mental.*health.*provider",
-                 frequent_mental_distress = "^v145_rawvalue$|frequent.*mental.*distress",
-                 excessive_drinking       = "^v049_rawvalue$|excessive.*drink")
+mh_patterns <- c(poor_mental_health_days  = "^v042_rawvalue$|poor.*mental.*health.*day|mentally.*unhealthy")
 .b1 <- "https://www.countyhealthrankings.org/sites/default/files/"
 .b2 <- "https://www.countyhealthrankings.org/sites/default/files/media/document/"
 chr_urls <- c("2010"=paste0(.b1,"analytic_data2010.csv"),"2011"=paste0(.b1,"analytic_data2011.csv"),
@@ -757,6 +674,60 @@ read_chr_year <- function(f) {
 }
 chr_panel <- map_dfr(list.files(CHR_DIR, pattern = "analytic_data\\d{4}\\.csv$", full.names = TRUE),
                      read_chr_year) %>% distinct(GEOID, year, .keep_all = TRUE)
+
+## (NEW) Alcohol-related deaths per 100k, computed directly from NVSS --------
+## NCHS standard "alcohol-induced deaths" definition. X65 (intentional
+## self-poisoning by alcohol) is DELIBERATELY EXCLUDED: it falls inside
+## suicide_codes (X60:X84), and including it would double-count deaths
+## already captured in the outcome variable -- the same reason overdose_codes
+## starts at X40, not X60. str_detect() with prefix matching is used because
+## several NCHS codes are only valid at the 4-character subcode level (e.g.
+## E24.4, not all of E24), while others (F10, K70) are valid as whole
+## 3-character chapters.
+alcohol_prefixes <- c(
+  "E244",   # Alcohol-induced pseudo-Cushing's syndrome
+  "F10",    # Mental/behavioural disorders due to alcohol use (whole chapter)
+  "G312",   # Degeneration of nervous system due to alcohol
+  "G621",   # Alcoholic polyneuropathy
+  "G721",   # Alcoholic myopathy
+  "I426",   # Alcoholic cardiomyopathy
+  "K292",   # Alcoholic gastritis
+  "K70",    # Alcoholic liver disease (whole chapter)
+  "K852",   # Alcohol-induced acute pancreatitis
+  "K860",   # Alcohol-induced chronic pancreatitis
+  "R780",   # Finding of alcohol in blood
+  "X45",    # Accidental poisoning by alcohol
+  "Y15"     # Poisoning by alcohol, undetermined intent
+  # X65 (intentional self-poisoning by alcohol) intentionally omitted --
+  # overlaps with suicide_codes (X60:X84).
+)
+alcohol_pattern <- paste0("^(", paste(alcohol_prefixes, collapse = "|"), ")")
+
+alcohol_summary <- bind_rows(lapply(mort_list, function(mort_df) {
+  mort_df %>%
+    filter(stringr::str_detect(ucod.icd.10, alcohol_pattern)) %>%
+    mutate(county_fips = sprintf("%03d", as.integer(county.occurrence)),
+           year = as.integer(data.year), state_abbr = state.occurrence) %>%
+    group_by(year, state_abbr, county_fips) %>%
+    summarise(alcohol_deaths = n(), .groups = "drop") %>%
+    left_join(state_codes, by = "state_abbr") %>%
+    mutate(GEOID = paste0(state_fips, county_fips)) %>%
+    select(year, GEOID, alcohol_deaths)
+})) %>% mutate(GEOID = sprintf("%05d", as.integer(GEOID)))
+
+alcohol_full <- scaffold_conf %>%
+  left_join(alcohol_summary, by = c("GEOID", "year")) %>%
+  mutate(alcohol_deaths = replace_na(alcohol_deaths, 0L)) %>%
+  left_join(pop_lookup, by = c("GEOID", "year")) %>%
+  mutate(alcohol_deaths_per_100k = if_else(ACS_TOT_POP_WT > 0, alcohol_deaths / ACS_TOT_POP_WT * 1e5, 0)) %>%
+  select(GEOID, year, alcohol_deaths_per_100k)
+
+# Verify before trusting this: confirm no overlap with the suicide outcome.
+# This should return 0 rows.
+# bind_rows(mort_list) %>%
+#   filter(ucod.icd.10 %in% suicide_codes,
+#         stringr::str_detect(ucod.icd.10, alcohol_pattern)) %>%
+#   nrow()
 
 ## (d) RAND firearm policies (state x year; binary in-force flags) -----------
 if (file.exists(RAND_XLSX)) {
@@ -794,16 +765,19 @@ my_data_with_spatial_g <- my_data_with_spatial_g %>%
   mutate(GEOID = sprintf("%05d", as.integer(GEOID)), year = as.integer(year)) %>%
   left_join(covid_full,     by = c("GEOID","year")) %>%
   left_join(overdose_full,  by = c("GEOID","year")) %>%
+  left_join(alcohol_full,   by = c("GEOID","year")) %>%
   left_join(chr_panel,      by = c("GEOID","year")) %>%
   left_join(firearm_policy, by = c("state","year")) %>%
   mutate(covid_deaths_per_100k    = replace_na(covid_deaths_per_100k, 0),
          overdose_deaths_per_100k = replace_na(overdose_deaths_per_100k, 0),
+         alcohol_deaths_per_100k  = replace_na(alcohol_deaths_per_100k, 0),
          across(any_of(c("fa_waiting_period","fa_cap","fa_min_age","fa_min_age_21")), ~ replace_na(.x, 0L)))
-# bridge CHR gap years within county, then z-score and set NA -> 0 (= the mean,
-# preserving N) so no observations drop out of the regressions
+# bridge CHR gap years within county (poor_mental_health_days only now),
+# then z-score and set NA -> 0 (= the mean, preserving N) so no observations
+# drop out of the regressions
 my_data_with_spatial_g <- my_data_with_spatial_g %>% arrange(GEOID, year) %>% group_by(GEOID) %>%
   fill(any_of(names(mh_patterns)), .direction = "downup") %>% ungroup()
-.new_cont <- c("covid_deaths_per_100k","overdose_deaths_per_100k", names(mh_patterns))
+.new_cont <- c("covid_deaths_per_100k","overdose_deaths_per_100k","alcohol_deaths_per_100k", names(mh_patterns))
 my_data_with_spatial_g[.new_cont] <- lapply(my_data_with_spatial_g[.new_cont], zstd_narm)
 my_data_with_spatial_g <- my_data_with_spatial_g %>%
   mutate(across(any_of(names(mh_patterns)), ~ replace_na(.x, 0)))
@@ -823,40 +797,30 @@ policy_data <- data.frame(
 t_1 <- left_join(my_data_with_spatial_g, policy_data, by = "state") %>%
   mutate(start_year = replace_na(start_year, 0))
 
-# 2) Create key DID indicators
 t_1 <- t_1 %>%
   mutate(
     ever_treated = if_else(start_year > 0, 1, 0),
     post         = if_else(year >= start_year & start_year > 0, 1, 0)
   )
-# Create a 0/1 policy variable called D_it
-# This indicates that county i, in year t, is treated if (ever_treated==1 & post==1).
 t_1 <- t_1 %>%
   mutate(D_it = as.numeric(ever_treated * post))
 
 ### ERPO exposure ###
-# ==========================================================
-#  ERPO social-exposure   (robust version)
-# ==========================================================
-
 pad5 <- function(x) sprintf("%05d", as.integer(x))
 
-# ---------- 1.  load raw files ------------------------------------------
 sci  <- fread("C:/Users/kusha/Desktop/opioid-sci/Data for Paper/SCI/county_county.tsv")
 meta <- fread("C:/Users/kusha/Downloads/county_data.csv",
               select = c("GEOID", "state")) |> unique()
 
-# ---------- 2.  ensure FIPS columns exist -------------------------------
 if (!all(c("i_fips","j_fips") %in% names(sci))) {
   setnames(sci,
-           old = names(sci)[1:2],          # assume first two columns = FIPS
+           old = names(sci)[1:2],
            new = c("i_fips","j_fips"))
 }
 sci[,  `:=`(i_fips = pad5(i_fips),
             j_fips = pad5(j_fips))]
 meta[, GEOID := pad5(GEOID)]
 
-# ---------- 3.  identify / rename SCI column ----------------------------
 if (!"SCI" %in% names(sci)) {
   num_cols <- names(Filter(is.numeric, sci))
   num_cols <- setdiff(num_cols, c("i_fips","j_fips"))
@@ -865,8 +829,6 @@ if (!"SCI" %in% names(sci)) {
   setnames(sci, num_cols, "SCI")
 }
 
-# ---------- 4.  origin / destination states -----------------------------
-# (rename if present, add via joins if absent)
 if ("i.state" %in% names(sci)) setnames(sci, "i.state", "i_state")
 if ("state"   %in% names(sci)) setnames(sci, "state",   "j_state")
 
@@ -879,15 +841,13 @@ if (!"j_state" %in% names(sci)) {
   setnames(sci, "state", "j_state")
 }
 
-# ---------- 5.  weight normalisation & collapse -------------------------
 sci[, totalSCI := sum(SCI), by = i_fips]
 sci[, w_ij     := SCI / totalSCI]
 
 w_i_state <- sci[i_state != j_state,
-                 .(w_is = sum(w_ij)),          # ?? weights to state j
+                 .(w_is = sum(w_ij)),
                  by = .(i_fips, j_state)]
 
-# ---------- 6.  ERPO adoption calendar ---------------------------------
 policy_data <- data.table(
   state      = c("CT","IN","CA","WA","OR","FL","VT","MD","RI","DE",
                  "MA","NJ","IL","NY","DC","CO","NV","HI","NM","VA"),
@@ -903,103 +863,74 @@ state_year <- CJ(state = unique(meta$state), year = years_panel)[
                                   year >= start_year)][
                                     , start_year := NULL]
 
-# ---------- 7.  county-year exposure ------------------------------------
 expo <- w_i_state[state_year,
-                  on = .(j_state = state),    # match destination state
+                  on = .(j_state = state),
                   allow.cartesian = TRUE][
                     ERPO_active == 1L,
                     .(ERPO_exposure = sum(w_is)),
                     by = .(i_fips, year)]
 
-# ---------- 8.  merge into analysis panel -------------------------------
 my_data_with_spatial_g <- my_data_with_spatial_g %>%
   mutate(GEOID = pad5(GEOID)) %>%
   left_join(expo, by = c("GEOID" = "i_fips", "year")) %>%
   mutate(ERPO_exposure = replace_na(ERPO_exposure, 0))
 
-# ------------------------------------------------------------------------
-# my_data_with_spatial_g now contains a fully-computed ERPO_exposure
-# ------------------------------------------------------------------------
-
-
-# Extract unique counties for the distance matrix
 unique_counties <- my_data_with_spatial_g %>%
   dplyr::distinct(GEOID, Longitude, Latitude) %>%
   dplyr::arrange(GEOID)
 
-# Compute geodesic distance in kilometers
 distance_km <- geodist::geodist(unique_counties[, c("Longitude","Latitude")],
                                 measure = "geodesic") / 1000
 
-# Initialize a matrix of the same size
 gravity_matrix <- InvDistMat(distance_km)
 
-# Optionally assign row/column names
 rownames(gravity_matrix) <- unique_counties$GEOID
 colnames(gravity_matrix) <- unique_counties$GEOID
 
-# 4) Normalize each row to create A_{i,j}
 diag(gravity_matrix) <- 0
 row_sums <- rowSums(gravity_matrix)
 gravity_matrix <- sweep(gravity_matrix, 1, row_sums, FUN = "/")
 
-
-
-## --- 1.  gravity-matrix  long table ---------------------------------
 gravity_dt <- as.data.table(as.table(gravity_matrix))
 setnames(gravity_dt, c("i_fips","j_fips","w_ij"))
 
 gravity_dt[, `:=`( i_fips = pad5(as.character(i_fips)),
                    j_fips = pad5(as.character(j_fips)) )]
 
-## --- 2.  destination-state membership ---------------------------------
-gravity_dt <- gravity_dt[meta, on = .(j_fips = GEOID), nomatch = 0]     # add j_state
+gravity_dt <- gravity_dt[meta, on = .(j_fips = GEOID), nomatch = 0]
 setnames(gravity_dt, "state", "j_state")
 
-gravity_dt <- gravity_dt[meta, on = .(i_fips = GEOID), nomatch = 0]     # add i_state
+gravity_dt <- gravity_dt[meta, on = .(i_fips = GEOID), nomatch = 0]
 setnames(gravity_dt, "state", "i_state")
 
-## --- 3.  attach yearly ERPO status  (exclude same state) --------------
 expo_dist <- gravity_dt[state_year,
                         on = .(j_state = state), allow.cartesian = TRUE][
-                          i_state != j_state &                       # << NEW
-                            ERPO_active == 1L,                         # keep active years
-                          .(InvDist_exposure = sum(w_ij)),           # Σ normalized 1/d_ij
+                          i_state != j_state &
+                            ERPO_active == 1L,
+                          .(InvDist_exposure = sum(w_ij)),
                           by = .(i_fips, year)]
-## --- 4.  merge into analysis panel ------------------------------------
 my_data_with_spatial_g <- my_data_with_spatial_g %>%
   mutate(GEOID = pad5(GEOID)) %>%
   left_join(expo_dist, by = c("GEOID" = "i_fips", "year")) %>%
   mutate(InvDist_exposure = replace_na(InvDist_exposure, 0))
 
-
-# -----------------------------------------------------------------------
-# my_data_with_spatial_g now contains InvDist_exposure (inverse-distance
-# based ERPO exposure) alongside ERPO_exposure from SCI weights.
-# -----------------------------------------------------------------------
-
-## --- Add ERPO treatment indicator D_it ---------------------------------
 my_data_with_spatial_g <- my_data_with_spatial_g %>% 
-  left_join(policy_data, by = "state") %>%                 # attach adoption year
+  left_join(policy_data, by = "state") %>%
   mutate(
-    start_year   = replace_na(start_year, 0L),             # 0 ??? never adopts
-    ever_treated = as.integer(start_year > 0L),            # county's state adopts at any time
-    post         = as.integer(year >= start_year &         # observation occurs after adoption
+    start_year   = replace_na(start_year, 0L),
+    ever_treated = as.integer(start_year > 0L),
+    post         = as.integer(year >= start_year &
                                 start_year > 0L),
-    D_it         = ever_treated * post                     # DiD indicator
+    D_it         = ever_treated * post
   )
 
-
-### all three did models ###
 my_data_with_spatial_g$state_year <- interaction(my_data_with_spatial_g$state, my_data_with_spatial_g$year, drop = TRUE)
 
-## experimenting with network exposure ####
-
 covariates <- c("ERPO_exposure","InvDist_exposure",
-  "population_density","ACS_PCT_AGE_U18", "ACS_PCT_AGE_18_44", "ACS_PCT_AGE_45_64", "ACS_PCT_AGE_ABOVE65",
-  "prop_black", "prop_asian", "prop_other", "prop_hispanic",
-  "ACS_MEDIAN_HH_INC", "ACS_PCT_ENGL_NOT_WELL",
-  "ACS_PCT_UNEMPLOY", "ACS_PCT_LT_HS"
+                "population_density","ACS_PCT_AGE_U18", "ACS_PCT_AGE_18_44", "ACS_PCT_AGE_45_64", "ACS_PCT_AGE_ABOVE65",
+                "prop_black", "prop_asian", "prop_other", "prop_hispanic",
+                "ACS_MEDIAN_HH_INC", "ACS_PCT_ENGL_NOT_WELL",
+                "ACS_PCT_UNEMPLOY", "ACS_PCT_LT_HS"
 )
 
 normalised <- function(x)
@@ -1007,29 +938,22 @@ normalised <- function(x)
   (x - mean(x)) / sd(x)
 }
 
-# Apply Min-Max scaling after Z-score standardization
 my_data_with_spatial_g[covariates] <- as.data.frame(lapply(my_data_with_spatial_g[covariates], normalised))
-
 
 
 # Political Affiliation Integration for Suicide Analysis (2010-2022)
 
-# Function to process the 2008-2016 election data
 process_election_data_0816 <- function(file_path) {
   
-  # Check if file exists
   if (!file.exists(file_path)) {
     cat("Warning: File not found:", file_path, "\n")
     return(tibble())
   }
   
-  # Read the 2008-2016 data
   election_0816 <- read_csv(file_path, show_col_types = FALSE)
   
-  # Process each election year
   political_results <- tibble()
   
-  # 2008 Election
   election_2008 <- election_0816 %>%
     select(fips_code, dem_2008, gop_2008) %>%
     filter(!is.na(fips_code), !is.na(dem_2008), !is.na(gop_2008)) %>%
@@ -1040,7 +964,6 @@ process_election_data_0816 <- function(file_path) {
     ) %>%
     select(GEOID, political_affiliation, election_year)
   
-  # 2012 Election
   election_2012 <- election_0816 %>%
     select(fips_code, dem_2012, gop_2012) %>%
     filter(!is.na(fips_code), !is.na(dem_2012), !is.na(gop_2012)) %>%
@@ -1051,7 +974,6 @@ process_election_data_0816 <- function(file_path) {
     ) %>%
     select(GEOID, political_affiliation, election_year)
   
-  # 2016 Election
   election_2016 <- election_0816 %>%
     select(fips_code, dem_2016, gop_2016) %>%
     filter(!is.na(fips_code), !is.na(dem_2016), !is.na(gop_2016)) %>%
@@ -1062,25 +984,20 @@ process_election_data_0816 <- function(file_path) {
     ) %>%
     select(GEOID, political_affiliation, election_year)
   
-  # Combine all years
   political_results <- bind_rows(election_2008, election_2012, election_2016)
   
   return(political_results)
 }
 
-# Function to process the 2020 election data
 process_election_data_2020 <- function(file_path) {
   
-  # Check if file exists
   if (!file.exists(file_path)) {
     cat("Warning: File not found:", file_path, "\n")
     return(tibble())
   }
   
-  # Read the 2020 data
   election_2020 <- read_csv(file_path, show_col_types = FALSE)
   
-  # Process 2020 election
   election_2020 <- election_2020 %>%
     filter(!is.na(county_fips), !is.na(votes_dem), !is.na(votes_gop)) %>%
     mutate(
@@ -1093,28 +1010,23 @@ process_election_data_2020 <- function(file_path) {
   return(election_2020)
 }
 
-# Process both election datasets
 cat("Processing 2008-2016 election data...\n")
 political_0816 <- process_election_data_0816("C:/Users/kusha/Downloads/US_County_Level_Presidential_Results_08-16.csv")
 
 cat("Processing 2020 election data...\n") 
 political_2020 <- process_election_data_2020("C:/Users/kusha/Downloads/US_County_Level_Presidential_Results_2020.csv")
 
-# Combine all election results
 all_political_results <- bind_rows(political_0816, political_2020)
 
-# Check if we have any political data
 if (nrow(all_political_results) == 0) {
   cat("ERROR: No political data loaded. Check file paths:\n")
   cat("- C:/Users/kusha/Downloads/US_County_Level_Presidential_Results_08-16.csv\n")
   cat("- C:/Users/kusha/Downloads/US_County_Level_Presidential_Results_2020.csv\n")
   cat("Skipping political affiliation analysis...\n")
 } else {
-  # Handle Shannon County rename (FIPS 46113 -> 46102)
   all_political_results <- all_political_results %>%
     mutate(GEOID = ifelse(GEOID == "46113", "46102", GEOID))
   
-  # Display summary of available election data
   cat("\nElection data summary:\n")
   all_political_results %>%
     group_by(election_year) %>%
@@ -1125,10 +1037,8 @@ if (nrow(all_political_results) == 0) {
     ) %>%
     print()
   
-  # Create the assignment logic for analysis years (2010-2022)
   assign_political_affiliation <- function() {
     
-    # Create the mapping based on your logic
     year_assignments <- tibble(
       analysis_year = 2010:2022,
       election_year = case_when(
@@ -1146,7 +1056,6 @@ if (nrow(all_political_results) == 0) {
     cat("Year assignment logic:\n")
     print(year_assignments)
     
-    # Create the political affiliation dataset for all analysis years
     political_panel <- year_assignments %>%
       left_join(all_political_results, by = "election_year") %>%
       select(GEOID, analysis_year, political_affiliation) %>%
@@ -1156,10 +1065,8 @@ if (nrow(all_political_results) == 0) {
     return(political_panel)
   }
   
-  # Create the political affiliation panel
   political_panel <- assign_political_affiliation()
   
-  # Merge with your main dataset and identify missing counties
   if (exists("my_data_with_spatial_g")) {
     
     analysis_counties <- unique(my_data_with_spatial_g$GEOID)
@@ -1173,12 +1080,10 @@ if (nrow(all_political_results) == 0) {
     cat("Matched counties:", length(matched_counties), "\n")
     cat("Missing from political data:", length(missing_counties), "\n")
     
-    # Show missing counties
     if (length(missing_counties) > 0) {
       cat("\nMissing counties (GEOID):\n")
       print(missing_counties)
       
-      # Get details about missing counties from your main dataset
       missing_county_details <- my_data_with_spatial_g %>%
         filter(GEOID %in% missing_counties) %>%
         select(GEOID, state, county_fips, state_fips) %>%
@@ -1189,7 +1094,6 @@ if (nrow(all_political_results) == 0) {
       print(missing_county_details)
     }
     
-    # Merge with your main dataset
     cat("\nMerging political affiliation into main dataset...\n")
     
     my_data_with_spatial_g <- my_data_with_spatial_g %>%
@@ -1198,11 +1102,9 @@ if (nrow(all_political_results) == 0) {
         by = c("GEOID", "year")
       )
     
-    # Check if political_affiliation column was created successfully
     if (!"political_affiliation" %in% names(my_data_with_spatial_g)) {
       cat("ERROR: political_affiliation column not created properly.\n")
     } else {
-      # Count successful merges and identify missing observations
       total_observations <- nrow(my_data_with_spatial_g)
       successful_merges <- my_data_with_spatial_g %>%
         filter(!is.na(political_affiliation)) %>%
@@ -1216,7 +1118,6 @@ if (nrow(all_political_results) == 0) {
       cat("Successful merges:", successful_merges, "out of", total_observations, "observations\n")
       cat("Missing observations:", missing_observations, "\n")
       
-      # Detailed analysis of missing observations
       if (missing_observations > 0) {
         cat("\nDetailed analysis of missing observations:\n")
         
@@ -1234,7 +1135,6 @@ if (nrow(all_political_results) == 0) {
         cat("Counties with missing political affiliation data:\n")
         print(missing_obs_details)
         
-        # Summary by state
         cat("\nMissing observations by state:\n")
         missing_by_state <- my_data_with_spatial_g %>%
           filter(is.na(political_affiliation)) %>%
@@ -1249,22 +1149,18 @@ if (nrow(all_political_results) == 0) {
         print(missing_by_state)
       }
       
-      # Add political_affiliation to covariates if it exists
       if (exists("covariates")) {
         covariates_updated <- c(covariates, "political_affiliation")
         assign("covariates", covariates_updated, envir = .GlobalEnv)
         cat("\nUpdated covariates list includes: political_affiliation\n")
       }
       
-      # Apply Alaska county imputation based on actual election data analysis
       if (missing_observations > 0) {
         cat("\nApplying Alaska county imputation...\n")
         
-        # Alaska imputation based on actual election data from countypres_20002024.csv
         alaska_imputation <- tribble(
           ~GEOID, ~year, ~political_affiliation, ~source,
           
-          # DISTRICT 13 (02013) - Consistently Republican based on actual election data
           "02013", 2010, 1, "actual_election",  "02013", 2011, 1, "actual_election",
           "02013", 2012, 1, "actual_election",  "02013", 2013, 1, "actual_election",
           "02013", 2014, 1, "actual_election",  "02013", 2015, 1, "actual_election",
@@ -1273,7 +1169,6 @@ if (nrow(all_political_results) == 0) {
           "02013", 2020, 1, "actual_election",  "02013", 2021, 1, "actual_election",
           "02013", 2022, 1, "actual_election",
           
-          # DISTRICT 16 (02016) - Rep 2008, Dem 2012-2020 based on actual election data
           "02016", 2010, 1, "actual_election",  "02016", 2011, 1, "actual_election",
           "02016", 2012, 0, "actual_election",  "02016", 2013, 0, "actual_election",
           "02016", 2014, 0, "actual_election",  "02016", 2015, 0, "actual_election",
@@ -1282,7 +1177,6 @@ if (nrow(all_political_results) == 0) {
           "02016", 2020, 0, "actual_election",  "02016", 2021, 0, "actual_election",
           "02016", 2022, 0, "actual_election",
           
-          # DISTRICT 20 (02020) - Rep 2008-2012, Dem 2016-2020 based on actual election data
           "02020", 2010, 1, "actual_election",  "02020", 2011, 1, "actual_election",
           "02020", 2012, 1, "actual_election",  "02020", 2013, 1, "actual_election",
           "02020", 2014, 1, "actual_election",  "02020", 2015, 1, "actual_election",
@@ -1291,7 +1185,6 @@ if (nrow(all_political_results) == 0) {
           "02020", 2020, 0, "actual_election",  "02020", 2021, 0, "actual_election",
           "02020", 2022, 0, "actual_election"
         ) %>%
-          # Add remaining Alaska counties using Republican pattern
           bind_rows(
             expand_grid(
               GEOID = c("02050", "02060", "02068", "02070", "02090", "02100", "02105", 
@@ -1301,12 +1194,11 @@ if (nrow(all_political_results) == 0) {
               year = 2010:2022
             ) %>%
               mutate(
-                political_affiliation = 1,  # Republican
+                political_affiliation = 1,
                 source = "alaska_pattern"
               )
           )
         
-        # Apply Alaska imputation to missing observations
         my_data_with_spatial_g <- my_data_with_spatial_g %>%
           left_join(
             alaska_imputation %>% 
@@ -1321,7 +1213,6 @@ if (nrow(all_political_results) == 0) {
           ) %>%
           select(-political_affiliation_alaska, -source)
         
-        # Final check
         final_missing <- sum(is.na(my_data_with_spatial_g$political_affiliation))
         alaska_imputed <- sum(my_data_with_spatial_g$political_imputed == 1, na.rm = TRUE)
         
@@ -1343,6 +1234,15 @@ if (nrow(all_political_results) == 0) {
     cat("Please ensure your main analysis dataset is loaded before running this script.\n")
   }
 }
+
+
+# =============================================================================
+# REGRESSIONS -- UPDATED
+# mental_health_providers, frequent_mental_distress, and excessive_drinking
+# REMOVED from every model below. alcohol_deaths_per_100k ADDED. 
+# poor_mental_health_days RETAINED.
+# =============================================================================
+
 ## no spill over ####
 did_no_spill <- felm(
   death_rates_per_100_k ~ D_it +   population_density +ACS_PCT_AGE_U18+ ACS_PCT_AGE_18_44
@@ -1351,8 +1251,8 @@ did_no_spill <- felm(
     ACS_MEDIAN_HH_INC +
     ACS_PCT_ENGL_NOT_WELL +
     ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS + political_affiliation
-  + covid_deaths_per_100k + overdose_deaths_per_100k
-  + poor_mental_health_days + mental_health_providers + frequent_mental_distress + excessive_drinking
+  + covid_deaths_per_100k + overdose_deaths_per_100k + alcohol_deaths_per_100k
+  + poor_mental_health_days
   + fa_waiting_period + fa_cap + fa_min_age_21
   | GEOID + year        # Fixed Effects
   | 0                    # No instrumental variables
@@ -1372,8 +1272,8 @@ did_spill_spatial <- felm(
     ACS_MEDIAN_HH_INC +
     ACS_PCT_ENGL_NOT_WELL +
     ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS + political_affiliation
-  + covid_deaths_per_100k + overdose_deaths_per_100k
-  + poor_mental_health_days + mental_health_providers + frequent_mental_distress + excessive_drinking
+  + covid_deaths_per_100k + overdose_deaths_per_100k + alcohol_deaths_per_100k
+  + poor_mental_health_days
   | GEOID + state_year | 0 | state,
   data = my_data_with_spatial_g,
   weights = my_data_with_spatial_g$ACS_TOT_POP_WT
@@ -1389,8 +1289,8 @@ did_spill_social <- felm(
     ACS_MEDIAN_HH_INC +
     ACS_PCT_ENGL_NOT_WELL +
     ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS + political_affiliation
-  + covid_deaths_per_100k + overdose_deaths_per_100k
-  + poor_mental_health_days + mental_health_providers + frequent_mental_distress + excessive_drinking
+  + covid_deaths_per_100k + overdose_deaths_per_100k + alcohol_deaths_per_100k
+  + poor_mental_health_days
   | GEOID + state_year | 0 | state,
   data = my_data_with_spatial_g,
   weights = my_data_with_spatial_g$ACS_TOT_POP_WT
@@ -1406,8 +1306,8 @@ did_spill_social_spatial <- felm(
     ACS_MEDIAN_HH_INC +
     ACS_PCT_ENGL_NOT_WELL +
     ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS + political_affiliation
-  + covid_deaths_per_100k + overdose_deaths_per_100k
-  + poor_mental_health_days + mental_health_providers + frequent_mental_distress + excessive_drinking
+  + covid_deaths_per_100k + overdose_deaths_per_100k + alcohol_deaths_per_100k
+  + poor_mental_health_days
   | GEOID + state_year | 0 |state ,
   data = my_data_with_spatial_g,
   weights = my_data_with_spatial_g$ACS_TOT_POP_WT
@@ -1415,15 +1315,12 @@ did_spill_social_spatial <- felm(
 summary(did_spill_social_spatial)
 
 ### confidence interval values for the ERPO Exposure ###
-## 1 ▸ Assemble the CI data
 ci_df <- bind_rows(
   tidy(did_spill_social,            conf.int = TRUE) |> mutate(model = "indirect social network exposure"),
   tidy(did_spill_social_spatial, conf.int = TRUE) |> mutate(model = "indirect social network exposure (controls for Spatial Exposure)")
 ) |>
-  filter(term == "ERPO_exposure")         # keep only the peer-exposure coefficient
+  filter(term == "ERPO_exposure")
 
-
-## 2 ▸ Dot-whisker plot matching the mock-up
 ggplot(ci_df,
        aes(x = estimate,
            y = factor(model, levels = c(
@@ -1451,15 +1348,11 @@ ggplot(ci_df,
         axis.ticks.y = element_blank())
 
 
-
 ### ENTIRE contiguous US map ###
-# -----------------------------------------------------------
-# 1 ▸ Compute the change in standardised ERPO exposure
-# -----------------------------------------------------------
 my_data_with_spatial_map <- my_data_with_spatial_g |>
   mutate(
     ERPO_exposure = if_else(GEOID == "31041" & is.na(ERPO_exposure),
-                            0,            # imputed value
+                            0,
                             ERPO_exposure)
   )
 
@@ -1467,68 +1360,49 @@ delta_df <- dcast(
   setDT(my_data_with_spatial_map)[year %in% c(2010, 2022)],
   GEOID ~ paste0("y", year),
   value.var      = "ERPO_exposure",
-  fun.aggregate  = mean,     # resolves duplicates
+  fun.aggregate  = mean,
   na.rm          = TRUE
 )[ , delta := y2022 - y2010 ]
 
-# -----------------------------------------------------------
-# 2 ▸ Keep only the 48 contiguous states + DC
-# -----------------------------------------------------------
 contig_fips <- sprintf("%02d", 1:56) |>
-  setdiff(c("02","15","60","66","69","72","78"))   # drop AK, HI, territories
+  setdiff(c("02","15","60","66","69","72","78"))
 
 us_map <- my_data_with_spatial_map|>
   filter(year == 2022, state_fips %in% contig_fips) |>
   select(GEOID, geometry) |>
   left_join(delta_df, by = "GEOID") |>
   st_as_sf() |>
-  st_transform(5070)        # Conterminous USA Albers Equal-Area
+  st_transform(5070)
 us_map$GEOID <- as.character(us_map$GEOID)
 
-# -------------------------------
-# 1 ▸ Reference geometry (48 + DC)
-# -------------------------------
 contig_fips <- sprintf("%02d", setdiff(1:56, c(2,15,60,66,69,72,78)))
 
-ref <- counties(cb = TRUE, year = 2022) %>%          # cb = cartographic boundary
-  filter(STATEFP %in% contig_fips) %>%               # drop AK, HI, territories
-  st_transform(5070) %>%                             # same CRS as your map
-  select(GEOID)                                      # keep only the key
+ref <- counties(cb = TRUE, year = 2022) %>%
+  filter(STATEFP %in% contig_fips) %>%
+  st_transform(5070) %>%
+  select(GEOID)
 
-# --------------------------------
-# 2 ▸ Missing GEOIDs in your layer
-# --------------------------------
-missing <- anti_join(ref %>% st_drop_geometry(),      # reference keys
-                     us_map %>% st_drop_geometry(),   # keys in your map
+missing <- anti_join(ref %>% st_drop_geometry(),
+                     us_map %>% st_drop_geometry(),
                      by = "GEOID")
 
 print(missing)
-#> returns a data frame; empty → all counties present
-#> non-empty → GEOIDs of absent counties
 
-# ------------------------------------------
-# 3 ▸ If `missing` non-empty: bring them in
-# ------------------------------------------
 if (nrow(missing) > 0) {
   us_map <- bind_rows(
     us_map,
-    ref %>%                    # geometry from reference
+    ref %>%
       filter(GEOID %in% missing$GEOID) %>% 
-      mutate(                  # attach data needed for plotting
+      mutate(
         y2010 = NA_real_,
         y2022 = NA_real_,
-        delta = 0              # or other imputation rule
+        delta = 0
       )
   )
 }
 
-# ------------------------------------------
-# 4 ▸ If `missing` empty but hole persists
-#    → geometry invalid → repair:
-# ------------------------------------------
 us_map <- st_make_valid(us_map)
 
-# Re-plot
 ggplot(us_map) +
   geom_sf(aes(fill = delta), linewidth = .05, colour = NA) +
   scale_fill_viridis_c(option = "plasma",
@@ -1536,26 +1410,23 @@ ggplot(us_map) +
                        na.value = "grey90") +
   coord_sf(crs = 5070, datum = NA) +
   theme_void(base_size = 12)
-### saving the plot ###
 
 p <- ggplot(us_map) +
   geom_sf(aes(fill = delta), linewidth = .05, colour = NA) +
   scale_fill_viridis_c(
     option = "plasma",
-    name   =  "Δ ERPO\nsocial exposure" # line-1 | line-2
+    name   =  "Δ ERPO\nsocial exposure"
   ) +
   coord_sf(crs = 5070, datum = NA) +
   theme_void(base_size = 12)
 p
 
-# embed a font that has Δ
-
 ggsave("Figure 2.pdf",
        plot   = p,
-       device = cairo_pdf,   # <- vector PDF, embeds all glyphs
+       device = cairo_pdf,
        width  = 6, height = 3.5, units = "in")
 
-### STARGAZER PLOTS ###
+### STARGAZER PLOTS -- UPDATED covariate.labels (3 removed, 1 added) ###
 stargazer(
   did_no_spill, 
   did_spill_social, 
@@ -1583,10 +1454,8 @@ stargazer(
     "Political Affiliation",
     "COVID-19 deaths per 100k",
     "Drug-overdose deaths per 100k",
+    "Alcohol-related deaths per 100k",
     "Poor mental health days",
-    "Mental health providers",
-    "Frequent mental distress",
-    "Excessive drinking",
     "Firearm: waiting period",
     "Firearm: child-access prevention",
     "Firearm: minimum purchase age 21"
@@ -1596,95 +1465,65 @@ stargazer(
   omit.stat = "ser",
   omit.table.layout = "n",
   column.sep.width = "1pt",
-  out = "output_table.tex"  # Save the output directly to a .tex file
+  out = "output_table.tex"
 )
 
 ### social proximity and spatial proximity ####
-### deaths social proximity ####
-# Subset and rename columns
-#Preparing `social_df` with necessary columns
 social_df <- suicide_mortality[, c("GEOID", "ACS_TOT_POP_WT", "death_rates_per_100_k")]
 colnames(social_df)[1] <- "fr_loc"
 colnames(social_df)[3] <- "deaths_per_capita"
 social_df <- social_df[order(social_df$fr_loc), ]
 
-# Reading and processing the TSV file
 df_0 <- read_tsv("C:/Users/kusha/Desktop/opioid-sci/Data for Paper/SCI/county_county.tsv")
 df_1 <- df_0 %>%
   filter(user_loc %in% social_df$fr_loc & fr_loc %in% social_df$fr_loc) %>%
   filter(!duplicated(paste0(pmax(user_loc, fr_loc), pmin(user_loc, fr_loc))))
 
-# Preparing data for adjacency matrix
 df_for_matrix_weights <- df_1 %>% select(user_loc, fr_loc, scaled_sci)
 nodes <- social_df %>% select(fr_loc) %>% distinct()
 
-# Create adjacency matrix
 k <- graph.data.frame(df_for_matrix_weights, directed = FALSE, vertices = nodes)
-
-## RENAMING THE COLUMN
 
 colnames(suicide_mortality)[1] <- "FIPS"
 
-# Adjusting weights by population
 population <- suicide_mortality %>%
   group_by(FIPS) %>%
   summarise(population = round(mean(ACS_TOT_POP_WT, na.rm = TRUE))) %>%
   filter(FIPS %in% nodes$fr_loc) %>%
-  arrange(match(FIPS, nodes$fr_loc))  # Ensure order matches the adjacency matrix
+  arrange(match(FIPS, nodes$fr_loc))
 
 pop_vector <- population$population
 
-
-### social and spatial proximity ###
-
-## --- 1A  social-network weights  w_ij  ---------------------------------
-## Inputs:  scaled_sci (SCI_ij), pop_vector (n_j), nodes$GEOID
-
-# 1.1  adjacency matrix of SCI_ij   (symmetric, zero diagonal)
 W   <- as_adjacency_matrix(k, attr = "scaled_sci", sparse = TRUE)
 diag(W) <- 0
 
-# 1.2  multiply each column j by population n_j
 W   <- sweep(W, 2, pop_vector, `*`)
 
-# 1.3  row-normalise   ⇒   Σ_{j≠i} w_ij = 1
 W   <- sweep(W, 1, rowSums(W), `/`)
 W[is.na(W)] <- 0                        
 
-
-## --- 1B  spatial-proximity weights  a_ij  ------------------------------
-## Inputs:  distance_km matrix (same ordering as nodes$GEOID)
-
-A   <- InvDistMat(distance_km)        # element = 1/d_ij  (diag = ∞ handled)
+A   <- InvDistMat(distance_km)
 diag(A) <- 0
-A  <- sweep(A, 1, rowSums(A), '/')   # row-normalise
+A  <- sweep(A, 1, rowSums(A), '/')
 
-# convert to data.table for speed
 setDT(my_data_with_spatial_g)
 setkey(my_data_with_spatial_g, GEOID)
 
-# result containers
 my_data_with_spatial_g[, `:=` (s_minus_i = NA_real_,
                                d_minus_i = NA_real_)]
 
 years <- sort(unique(my_data_with_spatial_g$year))
 
-
-### calculation step ###
 for (yr in years) {
   
   idx <- match(my_data_with_spatial_g[year == yr, GEOID], nodes$fr_loc)
   
-  ## y_t is the vector of OOD rates for year t in matrix order
   y_t <- my_data_with_spatial_g[year == yr][order(idx), death_rates_per_100_k]
   
-  ## social spill-over
   svec <- W[idx, , drop = FALSE] %*% y_t
   
-  ## spatial spill-over
   dvec <- A[idx, , drop = FALSE] %*% y_t
   
-  ## write back
   my_data_with_spatial_g[year == yr, `:=` (s_minus_i = as.numeric(svec),
                                            d_minus_i = as.numeric(dvec))]
 }
@@ -1692,7 +1531,7 @@ for (yr in years) {
 my_data_with_spatial_g[,  s_minus_i_z := as.numeric(scale(s_minus_i))]
 my_data_with_spatial_g[,  d_minus_i_z := as.numeric(scale(d_minus_i))]
 
-## two-way fixed effect for  social and spatial proximity ###
+## two-way fixed effect for  social and spatial proximity -- UPDATED covariates
 proximity <- felm(
   death_rates_per_100_k ~ s_minus_i_z +
     population_density +ACS_PCT_AGE_U18+ ACS_PCT_AGE_18_44
@@ -1701,8 +1540,8 @@ proximity <- felm(
     ACS_MEDIAN_HH_INC +
     ACS_PCT_ENGL_NOT_WELL +
     ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS
-  + covid_deaths_per_100k + overdose_deaths_per_100k
-  + poor_mental_health_days + mental_health_providers + frequent_mental_distress + excessive_drinking
+  + covid_deaths_per_100k + overdose_deaths_per_100k + alcohol_deaths_per_100k
+  + poor_mental_health_days
   + fa_waiting_period + fa_cap + fa_min_age_21
   | GEOID + year | 0 | state,
   data = my_data_with_spatial_g,
@@ -1718,26 +1557,22 @@ socio_spatial_proximity <-  felm(
     ACS_MEDIAN_HH_INC +
     ACS_PCT_ENGL_NOT_WELL +
     ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS
-  + covid_deaths_per_100k + overdose_deaths_per_100k
-  + poor_mental_health_days + mental_health_providers + frequent_mental_distress + excessive_drinking
+  + covid_deaths_per_100k + overdose_deaths_per_100k + alcohol_deaths_per_100k
+  + poor_mental_health_days
   + fa_waiting_period + fa_cap + fa_min_age_21
   | GEOID + year | 0 | state,
   data = my_data_with_spatial_g,
   weights = my_data_with_spatial_g$ACS_TOT_POP_WT
 )
 summary(socio_spatial_proximity)
-### proximity plots ####
 
 ## 1 ▸ Extract 95% CIs for the two peer-exposure terms
-## 1 ▸ Assemble the CI data
 ci_df <- bind_rows(
   tidy(proximity,            conf.int = TRUE) |> mutate(model = "social"),
   tidy(socio_spatial_proximity, conf.int = TRUE) |> mutate(model = "socio-spatial")
 ) |>
-  filter(term == "s_minus_i_z")         # keep only the peer-exposure coefficient
+  filter(term == "s_minus_i_z")
 
-
-## 2 ▸ Dot-whisker plot matching the mock-up
 ggplot(ci_df,
        aes(x = estimate,
            y = factor(model, levels = c("socio-spatial", "social")),
@@ -1749,15 +1584,12 @@ ggplot(ci_df,
   scale_colour_manual(values = c("social" = "red",
                                  "socio-spatial" = "blue"),
                       guide = "none") +
-  ## y-axis tick labels -> 'With' (socio-spatial) and 'Without' (social)
   scale_y_discrete(labels = c("socio-spatial" = "Model 2",
                               "social"         = "Model 1")) +
-  ## axis labels
   labs(
     x = "Change in focal-county suicide mortality (per 100,000)\nfor a one-SD increase in socially proximal counties suicide rate",
     y = NULL
   ) +
-  ## larger fonts (x-ticks and x-label)
   theme_classic(base_size = 12) +
   theme(
     axis.text.x  = element_text(size = 13),
@@ -1765,8 +1597,7 @@ ggplot(ci_df,
     axis.text.y  = element_text(size = 13)
   )
 
-### creating the table for reression results relating to proximity ###
-
+### creating the table for reression results relating to proximity -- UPDATED covariate.labels ###
 stargazer(
   proximity,
   socio_spatial_proximity,
@@ -1780,11 +1611,7 @@ stargazer(
     "from spatial propagation. Both specifications control for population density, age composition, ",
     "racial/ethnic composition, median household income, limited-English proficiency, unemployment, ",
     "and educational attainment. Standard errors are clustered by state to accommodate arbitrary ",
-    "spatial and temporal autocorrelation. The social-exposure coefficient remains large and significant ",
-    "(\\textasciitilde3.0 additional deaths per 100\\,000) after adjusting for spatial proximity; the ",
-    "spatial-exposure coefficient is positive and significant (\\textasciitilde0.9). Model fit is high ",
-    "in both cases ($R^{2}_{\\text{within}} \\approx 0.946$). Significance levels: *$p<0.05$; ",
-    "**$p<0.01$; ***$p<0.001$." ),
+    "spatial and temporal autocorrelation." ),
   column.labels = c("Social Proximity Only", "Socio-Spatial Proximity"),
   dep.var.labels = "Deaths per 100K",
   covariate.labels = c(
@@ -1804,10 +1631,8 @@ stargazer(
     "Percent with less than high school education",
     "COVID-19 deaths per 100k",
     "Drug-overdose deaths per 100k",
+    "Alcohol-related deaths per 100k",
     "Poor mental health days",
-    "Mental health providers",
-    "Frequent mental distress",
-    "Excessive drinking",
     "Firearm: waiting period",
     "Firearm: child-access prevention",
     "Firearm: minimum purchase age 21"
@@ -1819,163 +1644,8 @@ stargazer(
   column.sep.width = "1pt",
   out = "output_table.tex"
 )
-# ### event study code ####
-#   # 1) Inputs (from your workspace)
-#   # =========================
-# # my_data_with_spatial_g : county-year panel (data.frame/data.table)
-# # w_i_state              : long weights: i_fips, j_state, w_is
-# # policy_data            : state-level events: state, start_year (>0 = treated)
-# 
-# # Convert to data.table
-# panel  <- as.data.table(my_data_with_spatial_g)
-# wstate <- as.data.table(w_i_state)
-# 
-# # Standardize column names for the weights
-# setnames(wstate, c("i_fips","j_state","w_is"), c("GEOID","event_state","exposure"))
-# 
-# # Event list (only treated states with valid adoption years)
-# events <- as.data.table(policy_data)[start_year > 0,
-#                                      .(event_state = state, t0 = start_year)]
-# 
-# # =========================
-# # 2) Harmonize keys (fix type mismatch)
-# # =========================
-# # Keep GEOID as zero-padded character (width 5) everywhere
-# panel[,  GEOID := str_pad(as.character(GEOID), 5, pad = "0")]
-# wstate[, GEOID := str_pad(as.character(GEOID), 5, pad = "0")]
-# 
-# # Ensure 'state' is character for clustering
-# panel[, state := as.character(state)]
-# 
-# # If a state_year FE string is not present, create it
-# if (!"state_year" %in% names(panel)) {
-#   panel[, state_year := paste0(state, "_", year)]
-# }
-# 
-# # =========================
-# # 3) Design choices
-# # =========================
-# K_pre  <- 4  # leads: years before adoption kept in the stack
-# K_post <- 2  # lags: years after adoption kept in the stack
-# 
-# # =========================
-# # 4) Build stacked event–study data
-# # =========================
-# keep_cols <- c(
-#   "GEOID","year","state","death_rates_per_100_k","InvDist_exposure",
-#   "population_density","ACS_PCT_AGE_18_44","ACS_PCT_AGE_45_64",
-#   "ACS_PCT_AGE_ABOVE65","ACS_PCT_AGE_U18",
-#   "prop_black","prop_asian","prop_other","prop_hispanic",
-#   "ACS_MEDIAN_HH_INC","ACS_PCT_ENGL_NOT_WELL",
-#   "ACS_PCT_UNEMPLOY","ACS_PCT_LT_HS",
-#   "ACS_TOT_POP_WT","state_year"
-# )
-# 
-# stacked_es <- rbindlist(lapply(1:nrow(events), function(j) {
-#   
-#   st <- events$event_state[j]
-#   t0 <- events$t0[j]
-#   
-#   # Copy minimal slice
-#   tmp <- panel[, ..keep_cols]
-#   
-#   # Event label and relative year
-#   tmp[, `:=`(event_id = st,
-#              rel_year = year - t0)]
-#   
-#   # Keep window [-K_pre, K_post]
-#   tmp <- tmp[rel_year >= -K_pre & rel_year <= K_post]
-#   
-#   # Left join time-invariant exposure w_i^(st) for this treated state
-#   exp_st <- wstate[event_state == st, .(GEOID, exposure)]
-#   tmp <- merge(tmp, exp_st, by = "GEOID", all.x = TRUE)
-#   
-#   # Counties with no social ties to st get exposure = 0
-#   tmp[is.na(exposure), exposure := 0]
-#   
-#   tmp
-# }), use.names = TRUE, fill = TRUE)
-# 
-# # Global z-score of exposure in the stacked data
-# stacked_es[, exposure := scale(exposure)[, 1]]
-# 
-# # =========================
-# # 5) Estimate Wilson-style specification
-# # =========================
-# # FE: county-by-event_id and state_year-by-event_id (as in your code)
-# # Controls: as in your code
-# fml <- death_rates_per_100_k ~
-#   exposure:i(rel_year, ref = -1) + InvDist_exposure +
-#   population_density + ACS_PCT_AGE_U18 + ACS_PCT_AGE_18_44 +
-#   ACS_PCT_AGE_45_64 + ACS_PCT_AGE_ABOVE65 +
-#   prop_black + prop_asian + prop_other + prop_hispanic +
-#   ACS_MEDIAN_HH_INC + ACS_PCT_ENGL_NOT_WELL +
-#   ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS | 
-#   GEOID^event_id + state_year^event_id
-# 
-# est_es <- feols(
-#   fml,
-#   data    = stacked_es,
-#   weights = ~ ACS_TOT_POP_WT,
-#   cluster = ~ state
-# )
-# 
-# # Quick diagnostic: count support by event time and exposure>0
-# print(table(stacked_es$rel_year, stacked_es$exposure > 0))
-# 
-# # =========================
-# # 6) Coefficient table for plotting
-# # =========================
-# coef_df <- broom::tidy(est_es)[
-#   grepl("^exposure:rel_year", broom::tidy(est_es)$term),
-# ] 
-# coef_df$rel_year <- as.integer(stringr::str_extract(coef_df$term, "-?\\d+"))
-# coef_df <- coef_df[order(coef_df$rel_year), ]
-# 
-# # =========================
-# # 7) Event-study plot
-# # =========================
-# ggplot(coef_df, aes(x = rel_year, y = estimate)) +
-#   geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.25) +
-#   geom_vline(xintercept = 0, linetype = "dotted", linewidth = 0.25) +
-#   geom_line(linewidth = 0.5) +
-#   geom_pointrange(aes(ymin = estimate - 1.96 * std.error,
-#                       ymax = estimate + 1.96 * std.error),
-#                   size = 0.4) +
-#   labs(x = "Years relative to ERPO adoption",
-#        y = "Coefficient estimate (per 100,000)") +
-#   theme_minimal(base_size = 10)
-# 
-# # =========================
-# # 8) (Optional) DID 'did' package block without breaking FIPS
-# # =========================
-# # Keep character GEOID for joins; create a separate integer id for did::att_gt
-# panel[, id_int := as.integer(factor(GEOID))]
-# 
-# # Example call (if you need it):
-# library(did)
-# mw.attgt <- att_gt(
-#   yname    = "death_rates_per_100_k",
-#   gname    = "start_year",
-#   idname   = "id_int",
-#   tname    = "year",
-#   xformla  = ~ population_density + ACS_PCT_AGE_U18 + ACS_PCT_AGE_18_44 +
-#               ACS_PCT_AGE_45_64 + ACS_PCT_AGE_ABOVE65 +
-#               prop_black + prop_asian + prop_other + prop_hispanic +
-#               ACS_MEDIAN_HH_INC + ACS_PCT_ENGL_NOT_WELL +
-#               ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS,
-#   data       = panel,
-#   weightsname= "ACS_TOT_POP_WT",
-#   control_group = "nevertreated",
-#   est_method    = "reg",
-#   clustervars   = "state"
-# )
-# mw.dyn <- aggte(mw.attgt, type = "dynamic", min_e = -4, max_e = 2, na.rm = TRUE)
-# ggdid(mw.dyn)
 
-
-
-#### mixed with socia and spatial exposure 
+#### mixed with social and spatial exposure -- UPDATED covariates
 did_spill_social_spatial_robustness <- felm(
   death_rates_per_100_k ~ ERPO_exposure +  InvDist_exposure+  s_minus_i_z +
     population_density +ACS_PCT_AGE_U18+ ACS_PCT_AGE_18_44
@@ -1984,14 +1654,13 @@ did_spill_social_spatial_robustness <- felm(
     ACS_MEDIAN_HH_INC +
     ACS_PCT_ENGL_NOT_WELL +
     ACS_PCT_UNEMPLOY + ACS_PCT_LT_HS + political_affiliation
-  + covid_deaths_per_100k + overdose_deaths_per_100k
-  + poor_mental_health_days + mental_health_providers + frequent_mental_distress + excessive_drinking
+  + covid_deaths_per_100k + overdose_deaths_per_100k + alcohol_deaths_per_100k
+  + poor_mental_health_days
   | GEOID + state_year | 0 |state ,
   data = my_data_with_spatial_g,
   weights = my_data_with_spatial_g$ACS_TOT_POP_WT
 )
 summary(did_spill_social_spatial_robustness)
-
 
 stargazer(
   did_spill_social_spatial_robustness,
@@ -2018,23 +1687,19 @@ stargazer(
     "Political Affiliation",
     "COVID-19 deaths per 100k",
     "Drug-overdose deaths per 100k",
-    "Poor mental health days",
-    "Mental health providers",
-    "Frequent mental distress",
-    "Excessive drinking"
-  ),  # Also removed the trailing comma after the closing parenthesis
+    "Alcohol-related deaths per 100k",
+    "Poor mental health days"
+  ),
   keep.stat = c("n", "rsq", "adj.rsq", "f"),
   no.space = TRUE,
   omit.stat = "ser",
   omit.table.layout = "n",
   column.sep.width = "1pt",
-  out = "output_table.tex"  # Save the output directly to a .tex file
+  out = "output_table.tex"
 )
 
-# Create confidence interval data for just the single model
-# Create confidence interval data for just the single model
 ci_df <- tidy(did_spill_social_spatial_robustness, conf.int = TRUE) |>
-  filter(term == "ERPO_exposure") |>        # keep only the peer-exposure coefficient
+  filter(term == "ERPO_exposure") |>
   mutate(model = "socio-spatial")
 
 ggplot(ci_df,
@@ -2047,14 +1712,11 @@ ggplot(ci_df,
   geom_point(size = 3) +
   scale_colour_manual(values = c("socio-spatial" = "blue"),
                       guide = "none") +
-  # y-axis tick labels
   scale_y_discrete(labels = c("socio-spatial" = "indirect social network exposure\n(controls for spatial exposure &\ndeath rates in social proximity)")) +
-  # axis labels
   labs(
     x = "Change in focal-county suicide mortality (per 100,000)\nfor a 1-SD increase in socially proximal counties suicide rate",
     y = NULL
   ) +
-  # larger fonts (x-ticks and x-label)
   theme_classic(base_size = 12) +
   theme(
     axis.text.x  = element_text(size = 13),
